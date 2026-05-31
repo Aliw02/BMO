@@ -1,0 +1,203 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BMO — WebChat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="connBanner">
+  <i data-lucide="wifi-off"></i>
+  Connection lost — reconnecting...
+</div>
+
+<div class="app-container">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h2>
+        <i data-lucide="message-square"></i>
+        Sessions
+      </h2>
+      <button id="sidebarClose">
+        <i data-lucide="panel-left-close"></i>
+      </button>
+    </div>
+    <div class="session-list" id="sessionList"></div>
+    <div class="sidebar-footer">
+      <button id="btnProfile" class="profile-btn">
+        <i data-lucide="user-circle"></i>
+        <span>Profile</span>
+      </button>
+    </div>
+  </aside>
+
+  <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+  <main class="main-panel">
+    <div class="header-row">
+      <button id="sidebarToggle" class="icon-btn">
+        <i data-lucide="panel-left-open"></i>
+      </button>
+      <div class="status-indicator">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">Online</span>
+      </div>
+      <div class="header-right">
+        <span class="model-badge" id="modelBadge">
+          <i data-lucide="cpu"></i>
+          <span id="modelBadgeText">big-pickle</span>
+        </span>
+        <span class="mode-badge">
+          <i data-lucide="zap"></i>
+          Execute
+        </span>
+        <button id="reloadBtn" class="icon-btn" title="Reload">
+          <i data-lucide="rotate-ccw"></i>
+        </button>
+        <button id="themeToggle" class="icon-btn" title="Toggle theme">
+          <i data-lucide="sun"></i>
+        </button>
+      </div>
+    </div>
+
+    <div class="chat-area" id="chatArea">
+      <div class="empty" id="emptyState">
+        <i data-lucide="sparkles"></i>
+        Send a message to start ✨
+      </div>
+    </div>
+
+    <div class="typing-indicator" id="typingIndicator">
+      <span></span><span></span><span></span>
+    </div>
+
+    <div class="toolbar" id="toolbar">
+      <button id="btnNew">
+        <i data-lucide="plus"></i>
+        New
+      </button>
+      <button id="btnSummarize">
+        <i data-lucide="save"></i>
+        Save
+      </button>
+      <button id="btnReset">
+        <i data-lucide="trash-2"></i>
+        Clear
+      </button>
+      <button id="btnModels">
+        <i data-lucide="cpu"></i>
+        Models
+      </button>
+      <button id="btnAgents">
+        <i data-lucide="users"></i>
+        Agents
+      </button>
+    </div>
+
+    <div class="input-area">
+      <input type="text" id="msgInput" placeholder="Type your message..." autofocus>
+      <button id="sendBtn" disabled>
+        <i data-lucide="send"></i>
+      </button>
+    </div>
+  </main>
+</div>
+
+<!-- Models Modal -->
+<div class="modal-overlay" id="modelsModal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3><i data-lucide="cpu"></i> Select Model</h3>
+      <button class="modal-close" data-close="modelsModal"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body" id="modelsBody">
+      <div class="modal-loading"><i data-lucide="loader-2" class="spin"></i> Loading models...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Agents Modal -->
+<div class="modal-overlay" id="agentsModal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3><i data-lucide="users"></i> Select Agent</h3>
+      <button class="modal-close" data-close="agentsModal"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body" id="agentsBody">
+      <div class="modal-loading"><i data-lucide="loader-2" class="spin"></i> Loading agents...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Profile Modal -->
+<div class="modal-overlay" id="profileModal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3><i data-lucide="user-circle"></i> Profile</h3>
+      <button class="modal-close" data-close="profileModal"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body" id="profileBody">
+      <div class="profile-info">
+        <div class="profile-avatar">
+          <i data-lucide="user"></i>
+        </div>
+        <div class="profile-details">
+          <h4>BMO User</h4>
+          <p class="profile-id" id="profileId">ID: —</p>
+        </div>
+      </div>
+      <div class="profile-stats">
+        <div class="stat-card">
+          <i data-lucide="message-square"></i>
+          <span id="profileSessions">0</span>
+          <small>Sessions</small>
+        </div>
+        <div class="stat-card">
+          <i data-lucide="cpu"></i>
+          <span id="profileModel">Default</span>
+          <small>Model</small>
+        </div>
+        <div class="stat-card">
+          <i data-lucide="users"></i>
+          <span id="profileAgent">None</span>
+          <small>Agent</small>
+        </div>
+      </div>
+      <div class="profile-section">
+        <h4>Current Settings</h4>
+        <div class="setting-row">
+          <span>Theme</span>
+          <span class="setting-value" id="profileTheme">Dark</span>
+        </div>
+        <div class="setting-row">
+          <span>Mode</span>
+          <span class="setting-value">Execute</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/python.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/javascript.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/typescript.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/bash.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/json.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/css.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/xml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/sql.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/diff.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/atom-one-dark.min.css">
+</body>
+</html>

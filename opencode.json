@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/schema.json",
+  "mcp": {
+    "bmo-tools": {
+      "type": "sse",
+      "url": "http://127.0.0.1:4097/mcp",
+      "enabled": true
+    }
+  },
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "python -m http.server*": "deny",
+      "node server*": "deny",
+      "cloudflared*": "deny",
+      "nohup*": "deny",
+      "start /b*": "deny",
+      "start /min*": "deny",
+      "rm -rf*": "deny",
+      "del /f*": "deny",
+      "rmdir /s*": "deny"
+    }
+  }
+}

@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BMO — WebChat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-primary: #12151c;
+  --bg-secondary: #1a1e28;
+  --bg-card: #1e2330;
+  --gold: #d4a843;
+  --gold-light: #f0c27a;
+  --gold-dark: #a87d2e;
+  --text-primary: #e8e6e0;
+  --text-secondary: #9a9588;
+  --text-muted: #5c574e;
+  --border: #2a2e3a;
+  --success: #27ae60;
+  --danger: #e74c3c;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Cairo', sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  height: 100vh; overflow: hidden;
+}
+.app-layout { display: flex; height: 100vh; }
+
+.sidebar {
+  width: 280px; background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; flex-shrink: 0;
+  transition: margin-left 0.3s ease;
+  overflow-y: auto;
+}
+.sidebar.collapsed { margin-left: -280px; }
+.sidebar-header {
+  padding: 14px 16px; display: flex; justify-content: space-between;
+  align-items: center; border-bottom: 1px solid var(--border);
+}
+.sidebar-header h2 { font-size: 15px; color: var(--text-primary); }
+.sidebar-header button {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 22px; cursor: pointer;
+}
+.session-list { flex: 1; overflow-y: auto; padding: 8px; }
+.session-item {
+  padding: 10px 12px; border-radius: 10px; cursor: pointer;
+  margin-bottom: 4px; transition: background 0.15s;
+}
+.session-item:hover { background: var(--bg-card); }
+.session-item.active { background: var(--bg-card); border-left: 3px solid var(--gold); }
+.session-title { font-size: 14px; color: var(--text-primary); font-weight: 600; }
+.session-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+.main-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+.header-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px; background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.icon-btn {
+  background: none; border: none; color: var(--text-secondary);
+  font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 6px;
+}
+.icon-btn:hover { color: var(--text-primary); background: var(--bg-card); }
+.mode-badge {
+  font-size: 12px; padding: 2px 10px; border-radius: 10px;
+  background: var(--gold-dark); color: #fff; margin-left: auto;
+}
+
+.status-dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--gold);
+  box-shadow: 0 0 8px rgba(212, 168, 67, 0.4);
+  transition: background 0.3s, box-shadow 0.3s;
+  vertical-align: middle;
+}
+.status-dot.typing {
+  background: var(--gold-light);
+  box-shadow: 0 0 12px rgba(240, 194, 122, 0.6);
+  animation: pulse 0.8s infinite;
+}
+.status-dot.offline { background: #5c574e; box-shadow: none; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+.chat-area {
+  flex: 1; overflow-y: auto; padding: 20px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.chat-area::-webkit-scrollbar { width: 4px; }
+.chat-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.chat-area .empty { margin: auto; text-align: center; color: var(--text-muted); font-size: 14px; }
+
+.msg { max-width: 82%; padding: 12px 18px; border-radius: 16px; line-height: 1.7; font-size: 15px; font-weight: 500; word-wrap: break-word; animation: fadeIn 0.3s ease; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.msg.user { align-self: flex-end; background: linear-gradient(135deg, var(--gold), var(--gold-dark)); color: #12151c; border-bottom-left-radius: 4px; box-shadow: 0 2px 12px rgba(212, 168, 67, 0.15); }
+.msg.bmo { align-self: flex-start; background: var(--bg-card); border: 1px solid var(--border); border-bottom-right-radius: 4px; color: var(--text-primary); }
+.msg .time { font-size: 11px; font-weight: 400; color: inherit; opacity: 0.5; margin-top: 6px; text-align: right; direction: ltr; }
+.msg.bmo .time { text-align: left; }
+
+.code-block { background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 8px 0; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; overflow-x: auto; direction: ltr; text-align: left; }
+
+.toolbar {
+  display: flex; gap: 6px; padding: 8px 16px;
+  background: var(--bg-secondary); border-top: 1px solid var(--border);
+  flex-shrink: 0; overflow-x: auto;
+}
+.toolbar button {
+  padding: 6px 14px; border-radius: 20px; border: 1px solid var(--border);
+  background: var(--bg-card); color: var(--text-primary); font-size: 13px;
+  cursor: pointer; white-space: nowrap; transition: all 0.15s;
+  font-family: inherit;
+}
+.toolbar button:hover { border-color: var(--gold); color: var(--gold-light); }
+
+.input-area {
+  padding: 14px 16px 18px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  display: flex; gap: 10px; flex-shrink: 0;
+}
+.input-area input {
+  flex: 1; padding: 12px 18px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--bg-primary);
+  color: var(--text-primary); font-family: 'Cairo', sans-serif;
+  font-size: 15px; font-weight: 500; outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.input-area input:focus { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(212, 168, 67, 0.1); }
+.input-area input::placeholder { color: var(--text-muted); font-weight: 400; }
+.input-area button {
+  width: 48px; height: 48px; border-radius: 12px; border: none;
+  background: linear-gradient(135deg, var(--gold), var(--gold-dark));
+  color: #12151c; font-size: 20px; font-weight: 700; cursor: pointer;
+  transition: transform 0.15s, opacity 0.2s, box-shadow 0.2s;
+  display: flex; align-items: center; justify-content: center;
+}
+.input-area button:hover { opacity: 0.9; transform: scale(1.05); box-shadow: 0 0 20px rgba(212, 168, 67, 0.2); }
+.input-area button:active { transform: scale(0.95); }
+.input-area button:disabled { opacity: 0.3; cursor: not-allowed; transform: none; box-shadow: none; }
+
+.typing-indicator { align-self: flex-start; display: none; background: var(--bg-card); border: 1px solid var(--border); padding: 12px 20px; border-radius: 16px; border-bottom-right-radius: 4px; margin-top: -4px; }
+.typing-indicator.show { display: flex; gap: 5px; align-items: center; }
+.typing-indicator span { width: 8px; height: 8px; background: var(--gold); border-radius: 50%; animation: bounce 1.2s infinite; }
+.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-8px); } }
+
+#connBanner { display: none; position: fixed; top: 0; left: 0; right: 0; background: var(--danger); color: #fff; text-align: center; padding: 8px; font-size: 13px; font-weight: 600; z-index: 100; }
+#connBanner.show { display: block; }
+</style>
+</head>
+<body>
+
+<div id="connBanner">⚠️ Connection lost — reconnecting...</div>
+<div class="app-layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h2>💬 Sessions</h2>
+      <button id="sidebarClose">&times;</button>
+    </div>
+    <div class="session-list" id="sessionList"></div>
+  </aside>
+
+  <main class="main-panel">
+    <div class="header-row">
+      <button id="sidebarToggle" class="icon-btn">☰</button>
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Online</span>
+      <span class="mode-badge" id="modeBadge">⚡ Execute</span>
+      <button id="reloadBtn" class="icon-btn">🔄</button>
+    </div>
+
+    <div class="chat-area" id="chatArea">
+      <div class="empty" id="emptyState">Send a message to start ✨</div>
+    </div>
+
+    <div class="typing-indicator" id="typingIndicator">
+      <span></span><span></span><span></span>
+    </div>
+
+    <div class="toolbar" id="toolbar">
+      <button id="btnNew">🆕 New</button>
+      <button id="btnSummarize">💾 Save</button>
+      <button id="btnReset">🗑️ Clear</button>
+      <button id="btnModels">🤖 Models</button>
+      <button id="btnAgents">🎭 Agents</button>
+    </div>
+
+    <div class="input-area">
+      <input type="text" id="msgInput" placeholder="Type your message..." autofocus>
+      <button id="sendBtn" disabled>➤</button>
+    </div>
+  </main>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const chatArea = document.getElementById('chatArea');
+const emptyState = document.getElementById('emptyState');
+const input = document.getElementById('msgInput');
+const sendBtn = document.getElementById('sendBtn');
+const typingEl = document.getElementById('typingIndicator');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const connBanner = document.getElementById('connBanner');
+const sessionList = document.getElementById('sessionList');
+
+let sessions = [];
+let activeSessionId = null;
+
+// ── Socket.IO ──
+
+socket.on('connect', () => {
+  connBanner.classList.remove('show');
+  if (activeSessionId) socket.emit('set_session', activeSessionId);
+  setStatus('online');
+});
+socket.on('disconnect', () => { connBanner.classList.add('show'); setStatus('offline'); });
+
+socket.on('message', (msg) => {
+  if (msg.session_id && msg.session_id !== activeSessionId) return;
+  emptyState.style.display = 'none';
+  const div = document.createElement('div');
+  div.className = 'msg ' + msg.role;
+  div.innerHTML = renderMessage(msg.text) + `<div class="time">${new Date(msg.time).toLocaleTimeString()}</div>`;
+  chatArea.appendChild(div);
+  chatArea.scrollTop = chatArea.scrollHeight;
+});
+
+socket.on('bmo_status', (data) => {
+  if (data.status === 'typing') {
+    setStatus('typing');
+  } else {
+    setStatus('online');
+  }
+});
+
+// ── Session Sidebar ──
+
+async function loadSessions() {
+  try {
+    const r = await fetch('/api/sessions?chat_id=732356803');
+    sessions = await r.json();
+    renderSidebar();
+    const active = sessions.find(s => s.is_active);
+    if (active) activeSessionId = active.session_id;
+    else if (sessions.length) activeSessionId = sessions[0].session_id;
+  } catch (e) { /* ignore polling errors */ }
+}
+
+function renderSidebar() {
+  sessionList.innerHTML = sessions.map(s => `
+    <div class="session-item ${s.session_id === activeSessionId ? 'active' : ''}"
+         data-sid="${s.session_id}">
+      <div class="session-title">${escapeHtml(s.title)}</div>
+      <div class="session-meta">${s.msg_count} msgs</div>
+    </div>
+  `).join('');
+  sessionList.querySelectorAll('.session-item').forEach(el => {
+    el.addEventListener('click', () => switchSession(el.dataset.sid));
+  });
+}
+
+async function switchSession(sid) {
+  await fetch('/api/switch-session', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: 732356803, session_id: sid })
+  });
+  activeSessionId = sid;
+  await loadSessions();
+  await loadMessages(sid);
+  socket.emit('set_session', sid);
+}
+
+// ── Messages ──
+
+async function loadMessages(sid) {
+  if (!sid) { chatArea.innerHTML = ''; emptyState.style.display = 'block'; return; }
+  try {
+    const r = await fetch(`/api/messages?session_id=${sid}&limit=100`);
+    const msgs = await r.json();
+    chatArea.innerHTML = '';
+    if (msgs.length === 0) { emptyState.style.display = 'block'; return; }
+    emptyState.style.display = 'none';
+    msgs.forEach(m => {
+      const div = document.createElement('div');
+      div.className = 'msg ' + (m.sender === 'user' ? 'user' : 'bmo');
+      div.innerHTML = renderMessage(m.content) + `<div class="time">${new Date(m.timestamp * 1000).toLocaleTimeString()}</div>`;
+      chatArea.appendChild(div);
+    });
+    chatArea.scrollTop = chatArea.scrollHeight;
+  } catch (e) { console.error('Failed to load messages:', e); }
+}
+
+function renderMessage(text) {
+  return text.replace(/<pre>([\s\S]*?)<\/pre>/g, '<div class="code-block"><code>$1</code></div>').replace(/\n/g, '<br>');
+}
+
+// ── Toolbar ──
+
+document.getElementById('btnNew').addEventListener('click', async () => {
+  const r = await fetch('/api/new-session', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: 732356803 })
+  });
+  const data = await r.json();
+  await switchSession(data.session_id);
+});
+
+document.getElementById('btnReset').addEventListener('click', async () => {
+  if (!activeSessionId) return;
+  await fetch('/api/clear', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: activeSessionId })
+  });
+  chatArea.innerHTML = '';
+  emptyState.style.display = 'block';
+});
+
+document.getElementById('btnSummarize').addEventListener('click', async () => {
+  if (!activeSessionId) return;
+  statusText.textContent = 'Summarizing...';
+  const r = await fetch('/api/summarize', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: activeSessionId })
+  });
+  const data = await r.json();
+  statusText.textContent = 'Online';
+  if (data.summary) {
+    const div = document.createElement('div');
+    div.className = 'msg bmo';
+    div.innerHTML = '<b>📋 Summary</b><br>' + data.summary.slice(0, 500);
+    chatArea.appendChild(div);
+  }
+});
+
+document.getElementById('btnModels').addEventListener('click', async () => {
+  try {
+    const r = await fetch('/api/models');
+    const data = await r.json();
+    alert('Models: ' + JSON.stringify(data, null, 2).slice(0, 500));
+  } catch (e) {
+    alert('Failed to fetch models: ' + e.message);
+  }
+});
+
+document.getElementById('btnAgents').addEventListener('click', async () => {
+  try {
+    const r = await fetch('/api/agents?chat_id=732356803');
+    const agents = await r.json();
+    const names = agents.map(a => '\u2022 ' + (a.name || 'Unnamed') + ': ' + (a.description || 'No description')).join('\n');
+    alert('Custom Agents:\n' + (names || 'No custom agents'));
+  } catch (e) {
+    alert('Failed to fetch agents: ' + e.message);
+  }
+});
+
+// ── Input & Send ──
+
+input.addEventListener('input', () => { sendBtn.disabled = !input.value.trim(); });
+input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !sendBtn.disabled) send(); });
+sendBtn.addEventListener('click', send);
+
+function send() {
+  const text = input.value.trim();
+  if (!text) return;
+  socket.emit('user_message', { text, session_id: activeSessionId });
+  input.value = '';
+  sendBtn.disabled = true;
+  setStatus('typing');
+}
+
+// ── Helpers ──
+
+function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+
+function setStatus(state) {
+  statusDot.className = 'status-dot';
+  if (state === 'typing') {
+    statusDot.classList.add('typing');
+    statusText.textContent = 'Typing...';
+    typingEl.classList.add('show');
+  } else if (state === 'online') {
+    statusText.textContent = 'Online';
+    typingEl.classList.remove('show');
+  } else {
+    statusDot.classList.add('offline');
+    statusText.textContent = 'Offline';
+    typingEl.classList.remove('show');
+  }
+}
+
+// ── Init ──
+
+document.getElementById('sidebarToggle').onclick = () => document.getElementById('sidebar').classList.toggle('collapsed');
+document.getElementById('sidebarClose').onclick = () => document.getElementById('sidebar').classList.add('collapsed');
+document.getElementById('reloadBtn').onclick = () => location.reload();
+
+setInterval(loadSessions, 30000);
+loadSessions();
+</script>
+</body>
+</html>
