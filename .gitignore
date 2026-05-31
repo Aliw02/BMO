@@ -43,3 +43,15 @@ tests/
 opencode.json
 AGENTS.md
 
+# Standalone scratch, run, and utility scripts
+scratch/
+run.py
+__init__.py
+tools/get_session_summaries.py
+tools/run_detached.bat
+
+# Backups
+*.bak
+webchat/public/index.html.bak
+
+
