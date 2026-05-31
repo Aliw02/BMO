@@ -34,3 +34,12 @@ webchat/server_err.txt
 webchat/server_out.txt
 webchat/server_test.log
 webchat/server_test_err.log
+
+# Developer/IDE/Agent configuration and scripts
+.opencode/
+archive/
+docs/
+tests/
+opencode.json
+AGENTS.md
+
