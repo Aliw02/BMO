@@ -18,11 +18,17 @@ _local = threading.local()
 
 
 def _get_conn(db_path: str) -> sqlite3.Connection:
-    if not hasattr(_local, "conn") or _local.conn is None:
+    if not hasattr(_local, "conn") or _local.conn is None or getattr(_local, "conn_path", None) != db_path:
+        if hasattr(_local, "conn") and _local.conn is not None:
+            try:
+                _local.conn.close()
+            except Exception:
+                pass
         _local.conn = sqlite3.connect(db_path, timeout=30.0)
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA journal_mode=WAL")
         _local.conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn_path = db_path
     return _local.conn
 
 
@@ -110,6 +116,11 @@ class SQLiteStorage:
                 granted    INTEGER DEFAULT 1,
                 created_at REAL NOT NULL,
                 UNIQUE(user_id, scope)
+            );
+
+            CREATE TABLE IF NOT EXISTS session_groups (
+                chat_id  INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL
             );
         """)
         conn.commit()
@@ -248,6 +259,22 @@ class SQLiteStorage:
         except Exception as e:
             print(f"_fix_active_sessions error: {e}")
 
+    # ── Session Groups ─────────────────────────────────────────────────────
+
+    def sync_session_groups(self, owner_id: int, allowed_ids: set[int]):
+        """Populate session_groups table from OWNER_ID + ALLOWED_USER_IDS config."""
+        if not owner_id and not allowed_ids:
+            return
+        group_id = owner_id or next(iter(allowed_ids))
+        ids_to_map = {owner_id} if owner_id else set()
+        ids_to_map.update(allowed_ids)
+        for cid in ids_to_map:
+            self._exec(
+                "INSERT OR REPLACE INTO session_groups (chat_id, group_id) VALUES (?, ?)",
+                (cid, group_id),
+            )
+        self._conn().commit()
+
     # ── Session CRUD ──────────────────────────────────────────────────────
 
     def save_session(self, session: ChatSession) -> bool:
@@ -286,16 +313,17 @@ class SQLiteStorage:
                 ),
             )
 
-            # Only set active session pointer if none exists yet for this chat.
+            # Only set active session pointer if none exists yet for this group.
             # This prevents save_session from overwriting a manual session switch.
+            group_id = self._resolve_group(session.chat_id)
             existing_active = self._fetchone(
                 "SELECT session_id FROM active_sessions WHERE chat_id = ?",
-                (session.chat_id,),
+                (group_id,),
             )
             if not existing_active:
                 self._exec(
                     "INSERT OR REPLACE INTO active_sessions (chat_id, session_id) VALUES (?, ?)",
-                    (session.chat_id, session.session_id),
+                    (group_id, session.session_id),
                 )
 
             self._conn().commit()
@@ -306,9 +334,10 @@ class SQLiteStorage:
 
     def load_session(self, chat_id: int) -> Optional[ChatSession]:
         try:
+            group_id = self._resolve_group(chat_id)
             active = self._fetchone(
                 "SELECT session_id FROM active_sessions WHERE chat_id = ?",
-                (chat_id,),
+                (group_id,),
             )
             session_id = active["session_id"] if active else None
 
@@ -320,14 +349,19 @@ class SQLiteStorage:
                     return self._row_to_session(row)
 
             candidates = self._fetchall(
-                "SELECT * FROM sessions WHERE chat_id = ? ORDER BY updated_at DESC LIMIT 1",
-                (chat_id,),
+                "SELECT s.* FROM sessions s JOIN session_groups sg ON s.chat_id = sg.chat_id WHERE sg.group_id = ? ORDER BY s.updated_at DESC LIMIT 1",
+                (group_id,),
             )
+            if not candidates:
+                candidates = self._fetchall(
+                    "SELECT * FROM sessions WHERE chat_id = ? ORDER BY updated_at DESC LIMIT 1",
+                    (chat_id,),
+                )
             if candidates:
                 row = candidates[0]
                 self._exec(
                     "INSERT OR REPLACE INTO active_sessions (chat_id, session_id) VALUES (?, ?)",
-                    (chat_id, dict(row)["id"]),
+                    (group_id, dict(row)["id"]),
                 )
                 self._conn().commit()
                 return self._row_to_session(row)
@@ -340,9 +374,10 @@ class SQLiteStorage:
     def set_active_session(self, chat_id: int, session_id: str) -> bool:
         """Explicitly switch the active session pointer for a chat."""
         try:
+            group_id = self._resolve_group(chat_id)
             self._exec(
                 "INSERT OR REPLACE INTO active_sessions (chat_id, session_id) VALUES (?, ?)",
-                (chat_id, session_id),
+                (group_id, session_id),
             )
             self._conn().commit()
             return True
@@ -352,9 +387,10 @@ class SQLiteStorage:
 
     def delete_session(self, chat_id: int) -> bool:
         try:
+            group_id = self._resolve_group(chat_id)
             active = self._fetchone(
                 "SELECT session_id FROM active_sessions WHERE chat_id = ?",
-                (chat_id,),
+                (group_id,),
             )
             if active:
                 self._exec("DELETE FROM messages WHERE session_id = ?", (active["session_id"],))
@@ -369,9 +405,10 @@ class SQLiteStorage:
     def add_message(self, chat_id: int, sender: str, content: str, interface: str = 'telegram') -> bool:
         """Insert a single message directly into DB without rewriting the whole session."""
         try:
+            group_id = self._resolve_group(chat_id)
             active = self._fetchone(
                 "SELECT session_id FROM active_sessions WHERE chat_id = ?",
-                (chat_id,),
+                (group_id,),
             )
             if not active:
                 return False
@@ -409,20 +446,33 @@ class SQLiteStorage:
         return [dict(r) for r in reversed(rows)]
 
     def list_chat_sessions(self, chat_id: int) -> List[dict]:
+        group_id = self._resolve_group(chat_id)
         rows = self._fetchall(
-            """SELECT id, title, summary,
+            """SELECT id, title, summary, created_at,
                       (SELECT COUNT(*) FROM messages WHERE session_id = sessions.id) as msg_count,
                       updated_at,
                       (SELECT session_id FROM active_sessions WHERE chat_id = ?) as active_id
-               FROM sessions WHERE chat_id = ? ORDER BY updated_at DESC""",
-            (chat_id, chat_id),
+               FROM sessions
+               WHERE chat_id IN (SELECT chat_id FROM session_groups WHERE group_id = ?)
+               ORDER BY updated_at DESC""",
+            (group_id, group_id),
         )
+        if not rows:
+            rows = self._fetchall(
+                """SELECT id, title, summary, created_at,
+                          (SELECT COUNT(*) FROM messages WHERE session_id = sessions.id) as msg_count,
+                          updated_at,
+                          (SELECT session_id FROM active_sessions WHERE chat_id = ?) as active_id
+                   FROM sessions WHERE chat_id = ? ORDER BY updated_at DESC""",
+                (group_id, chat_id),
+            )
         return [
             {
                 "session_id": r["id"],
                 "title": r["title"] or r["id"][:8],
                 "summary": r["summary"][:100] if r["summary"] else "",
                 "msg_count": r["msg_count"],
+                "created_at": r["created_at"],
                 "updated_at": r["updated_at"],
                 "is_active": r["id"] == r["active_id"],
             }
@@ -435,9 +485,10 @@ class SQLiteStorage:
         )
         if not exists:
             return False
+        group_id = self._resolve_group(chat_id)
         self._exec(
             "INSERT OR REPLACE INTO active_sessions (chat_id, session_id) VALUES (?, ?)",
-            (chat_id, session_id),
+            (group_id, session_id),
         )
         self._conn().commit()
         return True
@@ -539,6 +590,13 @@ class SQLiteStorage:
             title=row_dict["title"] or "",
             session_id=row_dict["id"],
         )
+
+    def _resolve_group(self, chat_id: int) -> int:
+        """Return the group_id for a chat_id, or chat_id itself if not in a group."""
+        row = self._fetchone(
+            "SELECT group_id FROM session_groups WHERE chat_id = ?", (chat_id,)
+        )
+        return row["group_id"] if row else chat_id
 
     def get_stats(self) -> dict:
         """Returns global statistics for the admin."""

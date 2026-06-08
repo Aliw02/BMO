@@ -965,3 +965,329 @@ initFromUrlParams().then((loaded) => {
   updateModelBadge();
 }).catch(() => { initFallbackSession(); updateModelBadge(); });
 setInterval(loadSessions, 30000);
+
+// ── Mobile: swipe left to close sidebar ───────────────────────────
+(function setupSwipeToCloseSidebar() {
+  let startX = 0, startY = 0, tracking = false;
+
+  function onStart(e) {
+    if (window.innerWidth >= 768) return;
+    if (sidebar.classList.contains('collapsed')) return;
+    if (!e.touches || e.touches.length !== 1) return;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    tracking = true;
+  }
+
+  function onMove(e) {
+    if (!tracking) return;
+    const t = e.touches[0];
+    const dx = t.clientX - startX;
+    const dy = t.clientY - startY;
+    if (Math.abs(dy) > Math.abs(dx)) { tracking = false; return; }
+    if (dx < 0) e.preventDefault();
+  }
+
+  function onEnd(e) {
+    if (!tracking) return;
+    tracking = false;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - startX;
+    const dy = t.clientY - startY;
+    if (Math.abs(dy) > Math.abs(dx)) return;
+    if (dx < -50) {
+      sidebar.classList.add('collapsed');
+      sidebarOverlay.classList.remove('show');
+      updateSidebarIcon();
+    }
+  }
+
+  function attach() {
+    sidebar.addEventListener('touchstart', onStart, { passive: true });
+    sidebar.addEventListener('touchmove', onMove, { passive: false });
+    sidebar.addEventListener('touchend', onEnd, { passive: true });
+    sidebar.addEventListener('touchcancel', function () { tracking = false; }, { passive: true });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+// ── Mobile: Escape key closes sidebar ─────────────────────────────
+(function setupEscapeToCloseSidebar() {
+  function onKey(e) {
+    if (e.key !== 'Escape') return;
+    if (window.innerWidth >= 768) return;
+    if (sidebar.classList.contains('collapsed')) return;
+    sidebar.classList.add('collapsed');
+    sidebarOverlay.classList.remove('show');
+    updateSidebarIcon();
+  }
+  function attach() { document.addEventListener('keydown', onKey); }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+// ── Viewport: iOS 100vh fallback + visualViewport for keyboard ───
+(function setupViewportVars() {
+  function update() {
+    if (window.visualViewport) {
+      document.documentElement.style.setProperty('--viewport-height', window.visualViewport.height + 'px');
+    }
+    document.documentElement.style.setProperty('--vh', (window.innerHeight * 0.01) + 'px');
+  }
+  function attach() {
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', function () { setTimeout(update, 120); });
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', update);
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+// ── Mobile: orientation change resets sidebar ────────────────────
+(function setupOrientationReset() {
+  function onChange() {
+    setTimeout(function () {
+      if (window.innerWidth < 768 && !sidebar.classList.contains('collapsed')) {
+        sidebar.classList.add('collapsed');
+        sidebarOverlay.classList.remove('show');
+        updateSidebarIcon();
+      }
+    }, 200);
+  }
+  function attach() { window.addEventListener('orientationchange', onChange); }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+// ── Mobile: modal focus management + inert + tab trap ────────────
+(function setupModalFocus() {
+  const lastFocused = new Map();
+
+  function getFocusables(modal) {
+    return Array.from(modal.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    ));
+  }
+
+  function onModalAttrChange(mutations) {
+    for (const m of mutations) {
+      const modal = m.target;
+      const id = modal.id || '__modal__';
+      const isShown = modal.classList.contains('show');
+      const wasShown = (m.oldValue || '').split(/\s+/).indexOf('show') !== -1;
+      if (isShown && !wasShown) {
+        lastFocused.set(id, document.activeElement);
+        const main = document.querySelector('main');
+        if (main) main.setAttribute('inert', '');
+        setTimeout(function () {
+          const focusables = getFocusables(modal);
+          if (focusables.length) focusables[0].focus();
+        }, 0);
+      } else if (!isShown && wasShown) {
+        const main = document.querySelector('main');
+        if (main) main.removeAttribute('inert');
+        const prev = lastFocused.get(id);
+        if (prev && typeof prev.focus === 'function') {
+          try { prev.focus(); } catch (e) {}
+        }
+        lastFocused.delete(id);
+      }
+    }
+  }
+
+  function onTab(e) {
+    if (e.key !== 'Tab') return;
+    const open = document.querySelector('.modal-overlay.show, [id$="Modal"].show');
+    if (!open) return;
+    const focusables = getFocusables(open);
+    if (focusables.length === 0) { e.preventDefault(); return; }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  function attach() {
+    document.querySelectorAll('.modal-overlay, [id$="Modal"]').forEach(function (modal) {
+      const obs = new MutationObserver(onModalAttrChange);
+      obs.observe(modal, { attributes: true, attributeFilter: ['class'], attributeOldValue: true });
+    });
+    document.addEventListener('keydown', onTab);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+// ── Mobile: suggestion cards in empty state ──────────────────────
+(function setupSuggestionCards() {
+  function onClick(e) {
+    const card = e.target.closest('[data-suggestion]');
+    if (!card) return;
+    const text = card.getAttribute('data-suggestion') || '';
+    input.value = text;
+    sendBtn.disabled = !text.trim();
+    if (emptyState) emptyState.style.display = 'none';
+    input.focus();
+  }
+  function attach() {
+    if (emptyState) emptyState.addEventListener('click', onClick);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+// ── Mobile: active press state via event delegation ──────────────
+(function setupPressStates() {
+  const SELECTOR = '.icon-btn, .toolbar button, .btn-primary, .btn-secondary, #sendBtn, .agent-card, .model-card, .session-item, .scroll-to-bottom-pill';
+  function onStart(e) {
+    const btn = e.target.closest && e.target.closest(SELECTOR);
+    if (btn) btn.classList.add('is-pressed');
+  }
+  function clearAll() {
+    document.querySelectorAll('.is-pressed').forEach(function (el) { el.classList.remove('is-pressed'); });
+  }
+  function attach() {
+    document.addEventListener('touchstart', onStart, { passive: true });
+    document.addEventListener('touchend', clearAll, { passive: true });
+    document.addEventListener('touchcancel', clearAll, { passive: true });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+// ── Mobile: debounce re-clicks on network-triggering buttons ─────
+(function setupClickDebounce() {
+  const recentClicks = new Set();
+  const DEBOUNCE_MS = 500;
+
+  function makeGuard(keyFn) {
+    return function (e) {
+      const key = keyFn(e);
+      if (!key) return;
+      if (recentClicks.has(key)) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        return;
+      }
+      recentClicks.add(key);
+      setTimeout(function () { recentClicks.delete(key); }, DEBOUNCE_MS);
+    };
+  }
+
+  function attach() {
+    document.addEventListener('click', makeGuard(function (e) {
+      const el = e.target.closest('#sendBtn');
+      return el ? 'sendBtn' : '';
+    }), true);
+    document.addEventListener('click', makeGuard(function (e) {
+      const el = e.target.closest('.model-card');
+      return el ? 'model:' + (el.dataset.model || '') : '';
+    }), true);
+    document.addEventListener('click', makeGuard(function (e) {
+      const el = e.target.closest('.session-item');
+      return el ? 'session:' + (el.dataset.sid || '') : '';
+    }), true);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+// ── Scroll to bottom pill (visible when scrolled up) ─────────────
+(function setupScrollToBottomPill() {
+  let pill = null;
+  const SHOW_THRESHOLD = 200;
+
+  function ensurePill() {
+    if (pill) return pill;
+    pill = document.createElement('button');
+    pill.id = 'scrollToBottomPill';
+    pill.type = 'button';
+    pill.setAttribute('aria-label', 'Scroll to bottom');
+    pill.className = 'scroll-to-bottom-pill';
+    pill.innerHTML = '<i data-lucide="arrow-down"></i>';
+    pill.style.cssText = 'position:absolute;right:16px;bottom:16px;width:42px;height:42px;border-radius:50%;border:none;background:var(--accent-primary,#c97a3a);color:#fff;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.35);z-index:20;transition:opacity .2s,transform .2s;opacity:0;transform:translateY(8px);pointer-events:none;';
+    pill.addEventListener('click', function () {
+      chatArea.scrollTo({ top: chatArea.scrollHeight, behavior: 'smooth' });
+    });
+    const parent = chatArea.parentElement;
+    if (parent) {
+      const cs = getComputedStyle(parent);
+      if (cs.position === 'static') parent.style.position = 'relative';
+      parent.appendChild(pill);
+    }
+    lucide.createIcons();
+    return pill;
+  }
+
+  function show(p) {
+    p.style.display = 'flex';
+    requestAnimationFrame(function () {
+      p.style.opacity = '1';
+      p.style.transform = 'translateY(0)';
+      p.style.pointerEvents = 'auto';
+    });
+  }
+
+  function hide(p) {
+    p.style.opacity = '0';
+    p.style.transform = 'translateY(8px)';
+    p.style.pointerEvents = 'none';
+    setTimeout(function () { if (pill) pill.style.display = 'none'; }, 200);
+  }
+
+  function update() {
+    if (!chatArea) return;
+    const distance = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight;
+    if (distance > SHOW_THRESHOLD) {
+      show(ensurePill());
+    } else if (pill) {
+      hide(pill);
+    }
+  }
+
+  function attach() {
+    if (chatArea) chatArea.addEventListener('scroll', update, { passive: true });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();

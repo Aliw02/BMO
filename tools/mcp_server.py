@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Initialize FastMCP
 mcp = FastMCP("BMO-Tools")
 storage = SQLiteStorage()
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
 
@@ -90,10 +90,41 @@ async def request_permission(chat_id: int, reason: str, scope: str) -> str:
     Requests permission from the user for a sensitive action.
     BMO should call this before reading/writing files outside the project or performing destructive actions.
     """
+    def _allow_path(path: str):
+        import json
+        opencode_json_path = os.path.join(PROJECT_ROOT, "opencode.json")
+        if not os.path.exists(opencode_json_path):
+            return
+        try:
+            with open(opencode_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "permission" not in data:
+                data["permission"] = {}
+            if "write" not in data["permission"]:
+                data["permission"]["write"] = {}
+            if "read" not in data["permission"]:
+                data["permission"]["read"] = {}
+            
+            norm_path = os.path.normpath(path)
+            data["permission"]["write"][norm_path] = "allow"
+            data["permission"]["read"][norm_path] = "allow"
+            
+            # If path has no extension, assume directory wildcard allow too
+            if not os.path.splitext(norm_path)[1]:
+                data["permission"]["write"][os.path.join(norm_path, "*")] = "allow"
+                data["permission"]["read"][os.path.join(norm_path, "*")] = "allow"
+                
+            with open(opencode_json_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"Dynamically allowed path in opencode.json: {norm_path}")
+        except Exception as e:
+            logger.error(f"Failed to update opencode.json: {e}")
+
     # 1. Check permanent permissions
     existing = storage.check_permission(chat_id, scope)
     if existing == 1:
         logger.info(f"Permission auto-granted for {chat_id} on {scope}")
+        _allow_path(scope)
         return "granted"
     if existing == 0:
         logger.info(f"Permission auto-denied for {chat_id} on {scope}")
@@ -132,6 +163,8 @@ async def request_permission(chat_id: int, reason: str, scope: str) -> str:
         logger.info(f"Waiting for permission from {chat_id} for {scope}...")
         await asyncio.wait_for(event.wait(), timeout=300) # 5 min timeout
         result = pending_permissions[key]["result"]
+        if result == "granted":
+            _allow_path(scope)
         return result
     except asyncio.TimeoutError:
         return "denied (timeout)"

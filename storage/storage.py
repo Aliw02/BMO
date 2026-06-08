@@ -30,7 +30,7 @@ class StorageBackend(ABC):
         pass
 
     @abstractmethod
-    def add_message(self, chat_id: int, sender: str, content: str) -> bool:
+    def add_message(self, chat_id: int, sender: str, content: str, interface: str = 'telegram') -> bool:
         pass
 
     @abstractmethod
@@ -171,7 +171,7 @@ class JSONLStorage(StorageBackend):
             print(f"Error deleting session: {e}")
             return False
 
-    def add_message(self, chat_id: int, sender: str, content: str) -> bool:
+    def add_message(self, chat_id: int, sender: str, content: str, interface: str = 'telegram') -> bool:
         try:
             session = self.load_session(chat_id)
             if session:

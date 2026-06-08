@@ -1,51 +1,78 @@
-# OpenCode Telegram Bot
+# BMO
 
-A Telegram bot that bridges your local OpenCode instance to Telegram chats.
+[![npm version](https://img.shields.io/npm/v/@aliwey/bmo?color=blue)](https://www.npmjs.com/package/@aliwey/bmo)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![GitHub](https://img.shields.io/badge/GitHub-Aliw02%2FBMO-181717?logo=github)](https://github.com/Aliw02/BMO)
 
-## Setup
+**BMO** connects your local OpenCode instance to **Telegram**, a rich **CLI TUI**, and a **webchat** interface — all sharing a single SQLite database and session history.
+
+## Features
+
+- **Telegram Bot** — chat with BMO from anywhere via Telegram
+- **CLI TUI** — interactive terminal with rich markdown, session management, agent switching, and `!` shell commands
+- **Webchat** — browser-based chat with automatic Cloudflare Tunnel for public access
+- **Shared State** — all frontends share one SQLite database and one active session
+- **BFP Protocol** — peer-to-peer agent discovery and messaging (A2A-compatible)
+- **Self-Evolving** — BMO writes its own code, installs dependencies, and updates itself
+
+## Installation
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env   # then edit .env with your bot token
-python main.py
+npm install -g @aliwey/bmo
 ```
 
-## Configuration (.env)
+## Quick Start
 
-| Variable | Description |
-|---|---|
-| `TELEGRAM_TOKEN` | Your Telegram bot token from @BotFather |
-| `OPENCODE_HOST` | OpenCode host (default: 127.0.0.1) |
-| `OPENCODE_PORT` | OpenCode port (default: 4096) |
-| `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs allowed to use the bot (empty = everyone) |
-| `DEBUG` | Enable debug logging (default: False) |
+```bash
+# Setup wizard — links Telegram token and configures settings
+bmo init
+
+# Launch Telegram bot + CLI TUI
+bmo
+
+# Launch webchat with public Cloudflare Tunnel
+bmo web
+
+# Start peer-to-peer relay (BFP)
+bmo relay
+```
+
+## CLI Shell Commands
+
+In the CLI, prefix any command with `!` to run it as a shell command:
+
+```
+!git status
+!dir
+!npm install
+```
+
+BMO sees the output and can act on it.
+
+## Requirements
+
+- Python 3.10+
+- Node.js 18+
+- OpenCode server (auto-started by BMO)
 
 ## Commands
 
 | Command | Description |
-|---|---|
-| `/start` | Reconnect & welcome |
-| `/help` | Show help |
-| `/clear` | Clear chat history |
-| `/status` | Show OpenCode connection status |
+|---------|-------------|
+| `bmo` | Launch bot + CLI TUI |
+| `bmo init` | Configuration wizard |
+| `bmo web` | Webchat server + tunnel |
+| `bmo relay` | BFP peer relay |
+| `bmo --version` | Show version |
+| `bmo --update` | Update to latest |
 
-## Project Structure
+## Storage
 
-```
-├── main.py                 Entry point
-├── config/
-│   └── settings.py         Configuration & env loading
-├── core/
-│   └── bot_client.py       OpenCode subprocess client
-├── handlers/
-│   └── messages.py         Telegram message handlers
-├── models/
-│   └── chat_models.py      Data models (ChatSession, ChatMessage, UserMemory)
-├── storage/
-│   └── storage.py          JSON storage backend
-├── data/                   Chat history (auto-created)
-├── logs/                   Log files (auto-created)
-├── requirements.txt
-├── .env.example
-└── run_bot.bat             Windows launcher
-```
+All data lives in `~/.bmo/`:
+- `.env` — configuration
+- `data/bot.db` — SQLite database (sessions, memory, agents)
+- `logs/` — log files
+
+## License
+
+MIT © Aliwey

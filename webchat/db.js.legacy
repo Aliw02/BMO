@@ -1,8 +1,46 @@
-const Database = require('better-sqlite3');
 const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
 
-const DB_PATH = path.join(__dirname, '..', 'data', 'bot.db');
+let Database;
+try {
+  Database = require('better-sqlite3');
+} catch (e) {
+  if (e.code === 'ERR_DLOPEN_FAILED') {
+    console.error('[better-sqlite3] Native binding failed to load. Attempting rebuild...');
+    try {
+      execSync('npm rebuild better-sqlite3', { cwd: __dirname, stdio: 'inherit' });
+      Database = require('better-sqlite3');
+      console.log('[OK] better-sqlite3 rebuilt successfully');
+    } catch (rebuildErr) {
+      console.error('[FATAL] better-sqlite3 rebuild also failed:', rebuildErr.message);
+      console.error('Try: cd webchat && npm rebuild better-sqlite3');
+      process.exit(1);
+    }
+  } else {
+    throw e;
+  }
+}
+
+const fs = require('fs');
+
+// Resolve BMO_HOME (matches config/settings.py behavior):
+//   1. BMO_HOME env var
+//   2. Local dev mode: if a .env exists at project root (../.env), use project root
+//   3. Fallback to global path (~/.bmo)
+let BMO_HOME;
+if (process.env.BMO_HOME) {
+  BMO_HOME = process.env.BMO_HOME;
+} else if (fs.existsSync(path.join(__dirname, '..', '.env'))) {
+  BMO_HOME = path.join(__dirname, '..');
+} else {
+  BMO_HOME = path.join(os.homedir(), '.bmo');
+}
+
+const DB_PATH = process.env.BMO_DB_PATH || path.join(BMO_HOME, 'data', 'bot.db');
+
 const db = new Database(DB_PATH, { fileMustExist: false });
+
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 

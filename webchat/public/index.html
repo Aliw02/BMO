@@ -6,8 +6,7 @@
 <title>BMO — WebChat</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -19,7 +18,7 @@
 </div>
 
 <div class="app-container">
-  <aside class="sidebar" id="sidebar">
+  <aside class="sidebar" id="sidebar" aria-label="Sessions and profile navigation">
     <div class="sidebar-header">
       <h2>
         <i data-lucide="message-square"></i>
@@ -41,7 +40,7 @@
   <div class="sidebar-overlay" id="sidebarOverlay"></div>
 
   <main class="main-panel">
-    <div class="header-row">
+    <header class="header-row" aria-label="Chat session header">
       <button id="sidebarToggle" class="icon-btn">
         <i data-lucide="panel-left-open"></i>
       </button>
@@ -65,12 +64,36 @@
           <i data-lucide="sun"></i>
         </button>
       </div>
-    </div>
+    </header>
 
     <div class="chat-area" id="chatArea">
       <div class="empty" id="emptyState">
-        <i data-lucide="sparkles"></i>
-        Send a message to start ✨
+        <h1 class="empty-wordmark" lang="en">Hey, I'm <span class="empty-wordmark-accent">BMO</span>.</h1>
+        <div class="empty-divider" aria-hidden="true"></div>
+        <p class="empty-sub">What can I help you with today?</p>
+        <div class="empty-suggestions">
+          <button class="suggestion-card" type="button" data-suggestion="Plan my day with focused blocks, breaks, and the top 3 priorities.">
+            <span class="suggestion-icon" aria-hidden="true"><i data-lucide="calendar-days"></i></span>
+            <span class="suggestion-body">
+              <span class="suggestion-title">Plan my day</span>
+              <span class="suggestion-desc">Build a focused schedule with priorities</span>
+            </span>
+          </button>
+          <button class="suggestion-card" type="button" data-suggestion="Write a clean, well-commented Python script for the following task: ">
+            <span class="suggestion-icon" aria-hidden="true"><i data-lucide="code-2"></i></span>
+            <span class="suggestion-body">
+              <span class="suggestion-title">Write a Python script</span>
+              <span class="suggestion-desc">Get a starting point you can edit</span>
+            </span>
+          </button>
+          <button class="suggestion-card" type="button" data-suggestion="Explain this concept in plain language with a short example: ">
+            <span class="suggestion-icon" aria-hidden="true"><i data-lucide="lightbulb"></i></span>
+            <span class="suggestion-body">
+              <span class="suggestion-title">Explain a concept</span>
+              <span class="suggestion-desc">Plain language with an example</span>
+            </span>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -78,7 +101,7 @@
       <span></span><span></span><span></span>
     </div>
 
-    <div class="toolbar" id="toolbar">
+    <nav class="toolbar" id="toolbar" aria-label="Chat actions">
       <button id="btnNew">
         <i data-lucide="plus"></i>
         New
@@ -99,11 +122,11 @@
         <i data-lucide="users"></i>
         Agents
       </button>
-    </div>
+    </nav>
 
     <div class="input-area">
-      <input type="text" id="msgInput" placeholder="Type your message..." autofocus>
-      <button id="sendBtn" disabled>
+      <input type="text" id="msgInput" placeholder="Type your message..." autofocus inputmode="text" autocapitalize="sentences" autocomplete="off" spellcheck="true" enterkeyhint="send" aria-label="Message BMO">
+      <button id="sendBtn" disabled aria-label="Send message">
         <i data-lucide="send"></i>
       </button>
     </div>
@@ -111,7 +134,7 @@
 </div>
 
 <!-- Models Modal -->
-<div class="modal-overlay" id="modelsModal">
+<div class="modal-overlay" id="modelsModal" role="dialog" aria-modal="true" aria-label="Select model">
   <div class="modal-content">
     <div class="modal-header">
       <h3><i data-lucide="cpu"></i> Select Model</h3>
@@ -124,7 +147,7 @@
 </div>
 
 <!-- Agents Modal -->
-<div class="modal-overlay" id="agentsModal">
+<div class="modal-overlay" id="agentsModal" role="dialog" aria-modal="true" aria-label="Select agent">
   <div class="modal-content">
     <div class="modal-header">
       <h3><i data-lucide="users"></i> Select Agent</h3>
@@ -137,7 +160,7 @@
 </div>
 
 <!-- Profile Modal -->
-<div class="modal-overlay" id="profileModal">
+<div class="modal-overlay" id="profileModal" role="dialog" aria-modal="true" aria-label="Profile">
   <div class="modal-content">
     <div class="modal-header">
       <h3><i data-lucide="user-circle"></i> Profile</h3>

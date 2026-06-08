@@ -10,9 +10,11 @@ import re
 import time
 import httpx
 import json
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 
-from config.settings import OPENCODE_BASE_URL, OPENCODE_TIMEOUT, OPENCODE_POLL_INTERVAL, OPENCODE_POLL_TIMEOUT
+from core.worker_manager import WorkerManager
+
+from config.settings import OPENCODE_BASE_URL, OPENCODE_TIMEOUT, OPENCODE_POLL_INTERVAL, OPENCODE_POLL_TIMEOUT, MEMORY_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -38,49 +40,162 @@ class OpenCodeBotClient:
             base_url=OPENCODE_BASE_URL,
             headers=HEADERS,
             timeout=float(OPENCODE_TIMEOUT),
+            trust_env=False,
         )
         self._memory_cache: Optional[str] = None
         self._memory_cache_time: float = 0
         self._agents_cache: Optional[list] = None
         self._agents_cache_time: float = 0
-        self._memory_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "memory.md"))
+        self._memory_path = str(MEMORY_FILE)
+        self._worker: Optional[WorkerManager] = None
+        self._last_alive_error: Optional[str] = None
 
-    async def is_alive(self) -> bool:
-        """Lightweight check if the server is responding."""
+    def set_worker_manager(self, worker: WorkerManager):
+        self._worker = worker
+
+    async def _check_port_open(self, host: str = "127.0.0.1", port: int = 4800, timeout: float = 2.0) -> bool:
+        """Raw socket check — lightweight, no HTTP dependency."""
         try:
-            r = await self._http.get("/session", timeout=5.0)
-            return r.status_code == 200
+            import socket as _sock
+            _, _, port_str = OPENCODE_BASE_URL.rpartition(":")
+            port = int(port_str) if port_str.isdigit() else port
+            _, _, host_str = OPENCODE_BASE_URL.rstrip("/").rpartition("//")
+            host = host_str.split(":")[0] or host
+            s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+            s.settimeout(timeout)
+            result = s.connect_ex((host, port))
+            s.close()
+            return result == 0
         except Exception:
             return False
 
+    async def _check_http_alive(self, timeout: float = 5.0) -> tuple[bool, Optional[str]]:
+        """HTTP health check. Returns (is_up, error_message)."""
+        for attempt in range(3):
+            try:
+                r = await self._http.get("/session", timeout=timeout)
+                if r.status_code < 500:
+                    return True, None
+                return False, f"Server returned HTTP {r.status_code}"
+            except httpx.ConnectError as e:
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                    continue
+                return False, f"Connection refused ({e})"
+            except httpx.TimeoutException as e:
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                    continue
+                return False, f"Connection timed out ({e})"
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                    continue
+                return False, f"{type(e).__name__}: {e}"
+        return False, "All retries exhausted"
+
+    async def is_alive(self) -> bool:
+        """Lightweight check if the server is responding.
+        
+        Strategy: HTTP health check (3 retries) → raw socket fallback.
+        """
+        http_up, err = await self._check_http_alive()
+        if http_up:
+            self.is_connected = True
+            self._last_alive_error = None
+            return True
+
+        # Fallback: if port is open but HTTP failed, keep the error for debugging
+        port_open = await self._check_port_open()
+        if port_open:
+            self._last_alive_error = err
+        else:
+            self._last_alive_error = "Port not open — server is not running"
+        logger.error("is_alive check failed for %s: %s", OPENCODE_BASE_URL, self._last_alive_error)
+        self.is_connected = False
+        return False
+
     async def connect(self) -> bool:
         """Verify that opencode serve is reachable."""
-        try:
-            r = await self._http.get("/session")
-            if r.status_code == 200:
-                self.is_connected = True
-                logger.info("Connected to opencode serve at %s", OPENCODE_BASE_URL)
-            else:
-                logger.warning("opencode serve returned %d", r.status_code)
-                self.is_connected = False
-        except Exception as e:
-            logger.error("Cannot reach opencode serve: %s", e)
+        http_up, err = await self._check_http_alive(timeout=10.0)
+        if http_up:
+            self.is_connected = True
+            self._last_alive_error = None
+            logger.info("Connected to opencode serve at %s", OPENCODE_BASE_URL)
+        else:
+            self._last_alive_error = err
+            logger.error("Cannot reach opencode serve: %s", err)
             self.is_connected = False
         return self.is_connected
 
-    async def create_session(self, provider_id: Optional[str] = None, model_id: Optional[str] = None, env: Optional[dict] = None) -> Optional[str]:
+    async def diagnose_connection(self) -> dict:
+        """Full connection diagnostics. Tries multiple endpoints and gathers all info."""
+        result = {
+            "base_url": OPENCODE_BASE_URL,
+            "port_open": False,
+            "endpoints": {},
+            "error": None,
+        }
+        # 1. Raw socket check
+        port_open = await self._check_port_open()
+        result["port_open"] = port_open
+        
+        # 2. Try multiple endpoints
+        endpoints = ["/session", "/provider", "/agent", "/", "/health"]
+        for endpoint in endpoints:
+            for attempt in range(2):
+                try:
+                    r = await self._http.get(endpoint, timeout=3.0)
+                    result["endpoints"][endpoint] = {
+                        "status": r.status_code,
+                        "body_preview": r.text[:200],
+                    }
+                    break
+                except httpx.ConnectError as e:
+                    result["endpoints"][endpoint] = {"error": f"Connection refused: {e}"}
+                    break
+                except httpx.TimeoutException:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                        continue
+                    result["endpoints"][endpoint] = {"error": "Timed out after retry"}
+                except Exception as e:
+                    result["endpoints"][endpoint] = {"error": f"{type(e).__name__}: {e}"}
+                    break
+        
+        if not port_open and all("error" in v for v in result["endpoints"].values()):
+            result["error"] = "Port closed — OpenCode server is not running"
+        elif all("error" in v for v in result["endpoints"].values()):
+            # Port open but all HTTP fail
+            first_err = next((v["error"] for v in result["endpoints"].values() if "error" in v), "Unknown")
+            result["error"] = f"Port open but HTTP fails: {first_err}"
+        else:
+            working = [ep for ep, v in result["endpoints"].items() if v.get("status", 0) < 500]
+            if working:
+                result["error"] = None
+            else:
+                codes = {ep: v.get("status") for ep, v in result["endpoints"].items() if "status" in v}
+                result["error"] = f"All endpoints returned error status: {codes}"
+        
+        return result
+
+    async def create_session(self, provider_id: Optional[str] = None, model_id: Optional[str] = None, env: Optional[dict] = None, agent: str = "build") -> Optional[str]:
         """Create a new opencode session and return its ID."""
         try:
             # Force defaults if None/Empty
             p_id = provider_id if (provider_id and str(provider_id) != "None") else "opencode"
             m_id = model_id if (model_id and str(model_id) != "None") else "big-pickle"
             
-            # The server expects a nested 'model' object
+            # Map 'default' to 'build' to prevent server-side agent switching errors
+            agent_to_use = "build" if (not agent or agent == "default") else agent
+
+            # The server expects a nested 'model' object and optional 'agent'
             payload = {
                 "model": {
                     "id": m_id,
                     "providerID": p_id
-                }
+                },
+                "agent": agent_to_use
             }
             
             if env:
@@ -96,7 +211,7 @@ class OpenCodeBotClient:
             session_id = data.get("id")
             
             actual_model = data.get("model", {}).get("id", "Unknown")
-            logger.info("--- OPENCODE SESSION CREATED: %s (Model: %s) ---", session_id, actual_model)
+            logger.info("--- OPENCODE SESSION CREATED: %s (Model: %s, Agent: %s) ---", session_id, actual_model, agent_to_use)
             return session_id
         except Exception as e:
             logger.error("Failed to create session: %s", e)
@@ -122,6 +237,15 @@ class OpenCodeBotClient:
         except Exception as e:
             logger.error("Failed to fetch providers: %s", e)
             return {}
+
+    async def abort_session(self, session_id: str) -> bool:
+        """Send abort signal to the server to stop the current in-progress LLM stream."""
+        try:
+            r = await self._http.post(f"/session/{session_id}/abort", timeout=5.0)
+            return r.status_code < 400
+        except Exception as e:
+            logger.warning("abort_session failed (non-fatal): %s", e)
+            return False
 
     async def delete_messages(self, session_id: str) -> bool:
         """Clears all messages in a session (Reset History)."""
@@ -212,14 +336,54 @@ class OpenCodeBotClient:
         active_agent: str = "default",
         provider_env: Optional[dict] = None,
         chat_id: Optional[int] = None,
-        session_uuid: Optional[str] = None
+        session_uuid: Optional[str] = None,
+        on_token: Optional[Callable[[str], None]] = None,
+        on_activity: Optional[Callable[[str, str], None]] = None,
+        on_permission: Optional[Callable[[str, str, list], str]] = None,
+        on_question: Optional[Callable[[str, dict], Awaitable[list]]] = None,
+    ) -> str:
+        """Send a query via worker process, falling back to direct HTTP."""
+        if self._worker and self._worker.is_alive:
+            return await self._send_via_worker(
+                query=query, session_id=session_id, files=files,
+                provider_id=provider_id, model_id=model_id,
+                active_mode=active_mode, active_agent=active_agent,
+                provider_env=provider_env, chat_id=chat_id,
+                session_uuid=session_uuid, on_token=on_token,
+            )
+        return await self._send_direct(
+            query=query, session_id=session_id, files=files,
+            provider_id=provider_id, model_id=model_id,
+            active_mode=active_mode, active_agent=active_agent,
+            provider_env=provider_env, chat_id=chat_id,
+            session_uuid=session_uuid, on_token=on_token,
+            on_activity=on_activity,
+            on_permission=on_permission,
+            on_question=on_question,
+        )
+
+    async def _send_direct(
+        self, 
+        query: str, 
+        session_id: Optional[str] = None, 
+        files: Optional[list[dict]] = None,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        active_mode: str = "ask",
+        active_agent: str = "default",
+        provider_env: Optional[dict] = None,
+        chat_id: Optional[int] = None,
+        session_uuid: Optional[str] = None,
+        on_token: Optional[Callable[[str], None]] = None,
+        on_activity: Optional[Callable[[str, str], None]] = None,
+        on_permission: Optional[Callable[[str, str, list], str]] = None,
+        on_question: Optional[Callable[[str, dict], Awaitable[list]]] = None,
     ) -> str:
         """
-        Send a query to opencode serve with a hidden system context.
+        Send a query directly via HTTP. Fallback when worker is unavailable.
         Creates a new session if session_id is None.
         Accepts optional files list: [{"path": "...", "mime": "..."}]
         Returns the assistant's Telegram-HTML-formatted response.
-        No longer handles status callbacks — caller manages polling separately.
         """
         if not self.is_connected:
             connected = await self.connect()
@@ -228,7 +392,7 @@ class OpenCodeBotClient:
 
         if not session_id:
             # Inject keys if provided
-            session_id = await self.create_session(provider_id, model_id, env=provider_env)
+            session_id = await self.create_session(provider_id, model_id, env=provider_env, agent=active_agent)
             if not session_id:
                 return "Error: Could not create OpenCode session."
         
@@ -324,7 +488,7 @@ class OpenCodeBotClient:
                         },
                     ]
                 }
-                
+
                 if files:
                     for f in files:
                         file_path = f["path"].replace('\\', '/')
@@ -334,8 +498,14 @@ class OpenCodeBotClient:
                             "mime": f["mime"]
                         })
 
-                r = await self._http.post(f"/session/{sid}/message", json=payload)
+                r = await asyncio.wait_for(
+                    self._http.post(f"/session/{sid}/message", json=payload),
+                    timeout=float(OPENCODE_TIMEOUT),
+                )
                 return r, None
+            except asyncio.TimeoutError as e:
+                logger.error("Hard timeout (asyncio.wait_for) sending to session %s", sid)
+                return None, f"Request hard-cancelled after {OPENCODE_TIMEOUT}s (asyncio.wait_for)"
             except httpx.TimeoutException as e:
                 logger.error("Timeout sending prompt to session %s [%ss]: %s", sid, self._http.timeout, e)
                 return None, f"Request timed out after {self._http.timeout}s"
@@ -351,7 +521,7 @@ class OpenCodeBotClient:
         # Automatic recovery: if session not found, clear it and try once more
         if r is not None and r.status_code == 404:
             logger.warning("Session %s not found on server. Creating new session...", session_id)
-            session_id = await self.create_session(provider_id, model_id, env=provider_env)
+            session_id = await self.create_session(provider_id, model_id, env=provider_env, agent=active_agent)
             if not session_id:
                 return "Error: Session lost and could not create a new one."
             self.last_session_id = session_id
@@ -369,7 +539,90 @@ class OpenCodeBotClient:
             base_url=OPENCODE_BASE_URL,
             headers=HEADERS,
             timeout=10.0,
+            trust_env=False,
         )
+        # Track which part indices we've already emitted activity for (non-thinking parts only)
+        _seen_part_indices: set = set()
+        # Track last thinking text emitted to avoid redundant fires
+        _last_thinking: str = ""
+        _answered_questions = set()
+        stop_event = asyncio.Event()
+
+        async def bg_poller():
+            poll_client_bg = httpx.AsyncClient(
+                base_url=OPENCODE_BASE_URL,
+                headers=HEADERS,
+                timeout=10.0,
+                trust_env=False,
+            )
+            try:
+                while not stop_event.is_set():
+                    # 1. Check for pending MCP tool permissions matching this chat_id
+                    from core.shared_state import pending_permissions
+                    cli_keys = [k for k in list(pending_permissions.keys()) if k[0] == chat_id]
+                    if cli_keys and on_permission:
+                        for key in cli_keys:
+                            if pending_permissions.get(key) and pending_permissions[key]["result"] is None:
+                                scope = key[1]
+                                logger.info("Handling pending permission for %s in CLI (bg)", scope)
+                                ans = await on_permission(str(key), "mcp_tool_permission", [scope])
+                                pending_permissions[key]["result"] = "granted" if ans in ("allow", "always") else "denied"
+                                pending_permissions[key]["event"].set()
+
+                    # 2. Check for interactive questions
+                    try:
+                        r = await poll_client_bg.get(
+                            f"/session/{session_id}/message",
+                            params={"limit": "20"},
+                        )
+                        if r.status_code == 200:
+                            messages = r.json()
+                            if messages:
+                                msg = messages[-1]
+                                info = msg.get("info", {})
+                                role = info.get("role")
+                                if role == "assistant":
+                                    parts = msg.get("parts", [])
+                                    for p in parts:
+                                        if p.get("type") == "tool" and p.get("name") == "question":
+                                            call_id = p.get("callID")
+                                            state = p.get("state", {})
+                                            if state.get("status") == "running" and call_id not in _answered_questions and on_question:
+                                                logger.info("Interactive question received: %s (bg)", call_id)
+                                                _answered_questions.add(call_id)
+                                                try:
+                                                    answers = await on_question(call_id, state)
+                                                    response_payload = {
+                                                        "parts": [
+                                                            {
+                                                                "type": "tool-response",
+                                                                "callID": call_id,
+                                                                "name": "question",
+                                                                "content": json.dumps({"answers": answers})
+                                                            }
+                                                        ]
+                                                    }
+                                                    r_post = await poll_client_bg.post(
+                                                        f"/session/{session_id}/message",
+                                                        json=response_payload
+                                                    )
+                                                    r_post.raise_for_status()
+                                                except Exception as qe:
+                                                    logger.error("Failed to prompt or send question response (bg): %s", qe)
+                                                break
+                    except Exception as e:
+                        logger.debug("BG poller request failed (non-fatal): %s", e)
+
+                    # Poll every 500ms
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        continue
+            finally:
+                await poll_client_bg.aclose()
+
+        bg_task = asyncio.create_task(bg_poller())
+
         try:
             while time.monotonic() < deadline:
                 await asyncio.sleep(OPENCODE_POLL_INTERVAL)
@@ -383,7 +636,7 @@ class OpenCodeBotClient:
                     messages = r.json()
                     if not messages:
                         continue
-
+ 
                     # Only check the LATEST message to avoid returning old responses
                     msg = messages[-1]
                     info = msg.get("info", {})
@@ -407,6 +660,43 @@ class OpenCodeBotClient:
                         logger.error("Model returned error: %s", error_msg)
                         return f"Error: {error_msg}"
                     
+                    # --- Activity tracking: emit events for new parts ---
+                    if on_activity:
+                        # Accumulate full thinking text across all reasoning parts on this poll
+                        accumulated_thinking = "\n\n".join(
+                            (p.get("text", "") or "").strip()
+                            for p in parts
+                            if p.get("type") in ("reasoning", "thinking")
+                            and not p.get("synthetic")
+                            and (p.get("text", "") or "").strip()
+                        )
+                        if accumulated_thinking and accumulated_thinking != _last_thinking:
+                            _last_thinking = accumulated_thinking
+                            on_activity("thinking", accumulated_thinking)
+
+                        for idx, p in enumerate(parts):
+                            if idx in _seen_part_indices:
+                                continue
+                            _seen_part_indices.add(idx)
+                            p_type = p.get("type", "")
+                            if p.get("synthetic"):
+                                continue
+
+                            if p_type == "step-start":
+                                on_activity("step", "🔄 New reasoning step")
+                            elif p_type == "tool-use" or p_type == "tool_use":
+                                tool_name = p.get("name") or p.get("tool", {}).get("name", "unknown")
+                                tool_input = p.get("input") or p.get("tool", {}).get("input", {})
+                                detail = str(tool_input)[:120].replace("\n", " ") if tool_input else ""
+                                on_activity("tool_call", f"🔧 {tool_name}({detail})")
+                            elif p_type == "tool-result" or p_type == "tool_response":
+                                tool_name = p.get("name", "tool")
+                                is_error = p.get("isError", False)
+                                icon = "❌" if is_error else "✅"
+                                on_activity("tool_result", f"{icon} {tool_name} done")
+                            elif p_type == "text" and not p.get("synthetic"):
+                                on_activity("text_start", "✍️ Writing response...")
+                    
                     # Extract text from text-type parts only (not reasoning)
                     text_parts = []
                     for p in parts:
@@ -424,6 +714,10 @@ class OpenCodeBotClient:
                     
                     text = "\n".join(text_parts).strip()
                     
+                    # Fire streaming callback with partial text on every poll
+                    if text and on_token:
+                        on_token(text)
+
                     # Return if we have text and response is complete
                     if text and is_complete:
                         logger.info("Response received (%d chars, finish=%s)", len(text), finish_reason or "step-finish")
@@ -438,9 +732,130 @@ class OpenCodeBotClient:
                     continue
 
             logger.error("Polling timed out after %ds", OPENCODE_POLL_TIMEOUT)
+            # Abort server-side stream on timeout to prevent the server from
+            # continuing to process a request nobody is listening to anymore.
+            if session_id:
+                try:
+                    await self.abort_session(session_id)
+                except Exception:
+                    pass
             return "Error: Request timed out after 30 minutes."
         finally:
+            stop_event.set()
+            try:
+                await bg_task
+            except Exception:
+                pass
             await poll_client.aclose()
+
+    async def _send_via_worker(
+        self, 
+        query: str, 
+        session_id: Optional[str] = None, 
+        files: Optional[list[dict]] = None,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        active_mode: str = "ask",
+        active_agent: str = "default",
+        provider_env: Optional[dict] = None,
+        chat_id: Optional[int] = None,
+        session_uuid: Optional[str] = None,
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Send query via worker process (fully async, never blocks the event loop)."""
+        if not self.is_connected:
+            connected = await self.connect()
+            if not connected:
+                return "❌ Error: Could not connect to OpenCode backend. Is the server running?"
+
+        if not session_id:
+            session_id = await self.create_session(provider_id, model_id, env=provider_env, agent=active_agent)
+            if not session_id:
+                return "Error: Could not create OpenCode session."
+        
+        self.last_session_id = session_id
+
+        memory_content = await self._get_memory_content()
+
+        mode_prompts = _system_config["mode_prompts"]
+        mode_instruction = mode_prompts.get(active_mode, mode_prompts["execute"])
+        anti_loop = _system_config["anti_loop"]
+        agent_prompts = _system_config["agent_prompts"]
+        agent_instruction = agent_prompts.get(active_agent, "")
+
+        skills_block = ""
+        try:
+            agents = await self._get_agents_cached()
+            if agents:
+                lines = ["\n\n<AVAILABLE SKILLS>"]
+                for a in agents[:10]:
+                    name = a.get("name", "")
+                    desc = a.get("description", "")
+                    lines.append(f"- {name}: {desc}")
+                lines.append("</AVAILABLE SKILLS>\nUse these proactively when needed.")
+                skills_block = "\n".join(lines)
+        except Exception:
+            pass
+
+        chat_context = ""
+        if chat_id:
+            chat_context = f"\n\n[USER_CONTEXT]\nCURRENT_CHAT_ID: {chat_id}\nCURRENT_SESSION_ID: {session_uuid or 'unknown'}\n[END USER_CONTEXT]"
+            chat_context += "\n\n<b>FILE STORAGE</b>: When creating files, save them inside <code>data/files/</code>. Use date-based subfolders: <code>data/files/{{YYYY-MM-DD}}/{{CURRENT_SESSION_ID}}_{{HHMMSS}}_{{filename}}</code> so files are linked to sessions and dates."
+        
+        tool_instruction = _system_config["tool_instruction"]
+
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        system_base = TELEGRAM_SYSTEM_PROMPT.replace("{PROJECT_ROOT}", project_root)
+
+        security_warning = ""
+        external_paths = re.findall(r'([a-zA-Z]:\\[^`"\'\s\n<>]+|/[^`"\'\s\n<>]+)', query)
+        for p in external_paths:
+            try:
+                p_abs = os.path.abspath(p)
+                if not p_abs.startswith(project_root):
+                    security_warning = f"\n\n[SECURITY ALERT]\nUser requested access to external path: {p_abs}\nYou MUST call request_permission(chat_id={chat_id}, reason='...', scope='{p_abs}') before reading or processing this file.\n[END ALERT]"
+                    break
+            except Exception:
+                continue
+
+        tool_context = await self._build_tool_context()
+        memory_content = await self._get_memory_content()
+        memory_block = f"\n\n[LONG-TERM MEMORY]\n{memory_content}\n[END MEMORY]" if memory_content else ""
+        memory_instruction = _system_config["memory_instruction"]
+
+        full_system_context = system_base + memory_instruction + tool_instruction + chat_context + skills_block + memory_block + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + anti_loop + agent_instruction
+
+        payload = {
+            "parts": [
+                {
+                    "type": "text",
+                    "text": full_system_context,
+                    "synthetic": True,
+                },
+                {
+                    "type": "text",
+                    "text": query,
+                },
+            ]
+        }
+
+        if files:
+            for f in files:
+                file_path = f["path"].replace('\\', '/')
+                payload["parts"].append({
+                    "type": "file",
+                    "url": f"file:///{file_path}",
+                    "mime": f["mime"]
+                })
+
+        base_url = OPENCODE_BASE_URL.rstrip("/")
+
+        return await self._worker.send_query(
+            session_id=session_id,
+            payload=payload,
+            base_url=base_url,
+            callback=on_token,
+        )
 
     async def get_session_status(self, session_id: str) -> str:
         """Fetch current assistant status from the session. Returns an HTML status string."""
@@ -613,6 +1028,75 @@ class OpenCodeBotClient:
         except Exception as e:
             logger.error("Test key error: %s", e)
             return False, f"System error during test: {str(e)}"
+
+    async def send_simple_query(self, query: str, timeout: float = 120.0) -> str:
+        """Send a minimal query WITHOUT the full BMO system context.
+
+        Used for lightweight tasks like summarization where the full
+        system prompt + memory + tools would be wasteful overhead.
+        Creates a temp session, sends just the query, polls, returns text.
+        """
+        if not self.is_connected:
+            connected = await self.connect()
+            if not connected:
+                raise ConnectionError("Could not connect to OpenCode backend")
+
+        session_id = await self.create_session()
+        if not session_id:
+            raise RuntimeError("Could not create OpenCode session")
+
+        payload = {"parts": [{"type": "text", "text": query}]}
+
+        r = await self._http.post(f"/session/{session_id}/message", json=payload, timeout=timeout)
+        if r.status_code not in (200, 201):
+            raise RuntimeError(f"Server returned {r.status_code}: {r.text[:200]}")
+
+        deadline = time.monotonic() + timeout
+        poll_client = httpx.AsyncClient(
+            base_url=OPENCODE_BASE_URL,
+            headers=HEADERS,
+            timeout=10.0,
+            trust_env=False,
+        )
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(OPENCODE_POLL_INTERVAL)
+                try:
+                    r = await poll_client.get(f"/session/{session_id}/message", params={"limit": "20"})
+                    if r.status_code != 200:
+                        continue
+                    messages = r.json()
+                    if not messages:
+                        continue
+                    msg = messages[-1]
+                    info = msg.get("info", {})
+                    role = info.get("role")
+                    if role != "assistant":
+                        continue
+                    parts = msg.get("parts", [])
+                    has_finish = any(p.get("type") == "step-finish" for p in parts)
+                    finish_reason = info.get("finish")
+                    is_complete = has_finish or finish_reason in ("stop", "error", "length")
+
+                    error_parts = [p for p in parts if p.get("type") == "error"]
+                    if error_parts:
+                        raise RuntimeError(error_parts[0].get("message", "Unknown error"))
+
+                    text_parts = [p.get("text", "") for p in parts if p.get("type") == "text" and not p.get("synthetic")]
+                    text = "\n".join(text_parts).strip()
+
+                    if text and is_complete:
+                        self.last_session_id = session_id
+                        return text
+                except httpx.TimeoutException:
+                    continue
+                except Exception as e:
+                    logger.debug("Poll error in send_simple_query: %s", e)
+                    continue
+
+            raise TimeoutError(f"Simple query timed out after {timeout}s")
+        finally:
+            await poll_client.aclose()
 
     async def close(self):
         await self._http.aclose()

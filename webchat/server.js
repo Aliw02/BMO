@@ -1,16 +1,11 @@
-﻿const express = require('express');
+const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
-const {
-  db, listSessions, getSessionById, getActiveSession, getMessages,
-  createSession, setActiveSession, switchSession,
-  addMessageStmt, updateSessionTime, getOpenCodeSessionId, setOpenCodeSessionId,
-  updateSummary, deleteMessages, updateTitle,
-} = require('./db');
+const db = require('./db_api');
 
 // ── Load shared system prompt config (single source of truth) ──
 const configPath = path.join(__dirname, '..', 'config', 'system-prompt.json');
@@ -19,13 +14,13 @@ const systemConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 function buildSystemPrompt(mode = 'execute', agent = 'default', chatId = null, sessionId = null) {
   const modeInstruction = systemConfig.mode_prompts[mode] || systemConfig.mode_prompts.execute;
   const agentInstruction = systemConfig.agent_prompts[agent] || '';
-  
+
   let chatContext = '';
   if (chatId) {
     chatContext = `\n\n[USER_CONTEXT]\nCURRENT_CHAT_ID: ${chatId}\nCURRENT_SESSION_ID: ${sessionId || 'unknown'}\n[END USER_CONTEXT]`;
     chatContext += '\n\n<b>FILE STORAGE</b>: When creating files, save them inside <code>data/files/</code>. Use date-based subfolders: <code>data/files/{YYYY-MM-DD}/{CURRENT_SESSION_ID}_{HHMMSS}_{filename}</code> so files are linked to sessions and dates.';
   }
-  
+
   return systemConfig.base_prompt + systemConfig.memory_instruction + systemConfig.tool_instruction + chatContext + systemConfig.anti_loop + agentInstruction + `\n\nCURRENT PROTOCOL: ${modeInstruction}`;
 }
 
@@ -35,139 +30,118 @@ const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } 
 
 app.use(cors());
 app.use(express.json());
+
+// ── Auto-redirect root to active session (before static middleware) ──
+app.get('/', async (req, res) => {
+  if (req.query.chat_id && req.query.session_id) {
+    return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  }
+  const chatId = await db.resolveChatId();
+  if (chatId) {
+    try {
+      const sessions = await db.listSessions(chatId);
+      const active = sessions.find(s => s.is_active);
+      if (active) {
+        return res.redirect(`/?chat_id=${chatId}&session_id=${active.session_id}`);
+      }
+      if (sessions.length > 0) {
+        return res.redirect(`/?chat_id=${chatId}&session_id=${sessions[0].session_id}`);
+      }
+    } catch (_) {}
+  }
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
-const OPENCODE_PORT = process.env.OPENCODE_PORT || process.env.OPENCODE_SERVER_PORT || '4096';
+const OPENCODE_PORT = process.env.OPENCODE_PORT || process.env.OPENCODE_SERVER_PORT || '4800';
 const OPENCODE_URL = `http://127.0.0.1:${OPENCODE_PORT}`;
 
 // ── REST Endpoints ────────────────────────────────────────────
 
-function resolveChatId(chatId) {
-  if (chatId) return chatId;
-  const row = db.prepare('SELECT DISTINCT chat_id FROM sessions ORDER BY updated_at DESC LIMIT 1').get();
-  return row ? row.chat_id : null;
-}
-
-app.get('/api/sessions', (req, res) => {
-  const chatId = resolveChatId(parseInt(req.query.chat_id));
+app.get('/api/sessions', async (req, res) => {
+  const chatId = await db.resolveChatId(parseInt(req.query.chat_id));
   if (!chatId) return res.json([]);
   try {
-    const rows = listSessions.all(chatId, chatId);
-    const activeRow = getActiveSession.get(chatId);
-    const sessions = rows.map(r => ({
-      session_id: r.id,
-      title: r.title || r.id.slice(0, 8),
-      summary: (r.summary || '').slice(0, 100),
-      msg_count: r.msg_count,
-      updated_at: r.updated_at,
-      is_active: r.id === (activeRow ? activeRow.session_id : null),
-    }));
+    const sessions = await db.listSessions(chatId);
     res.json(sessions);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/new-session', express.json(), (req, res) => {
-  const cid = resolveChatId(req.body.chat_id);
+app.post('/api/new-session', async (req, res) => {
+  const cid = await db.resolveChatId(req.body.chat_id);
   if (!cid) return res.status(400).json({ error: 'chat_id required' });
   const uid = req.body.user_id || cid;
-  const now = Date.now() / 1000;
-  const sid = uuidv4();
   try {
-    createSession.run(sid, cid, uid, req.body.username || '', now, now);
-    setActiveSession.run(cid, sid);
-    res.json({ session_id: sid });
+    const result = await db.createSession(cid, uid, req.body.username || '');
+    res.json({ session_id: result.session_id });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/switch-session', express.json(), (req, res) => {
+app.post('/api/switch-session', async (req, res) => {
   const { chat_id, session_id } = req.body;
-  const cid = resolveChatId(chat_id);
+  const cid = await db.resolveChatId(chat_id);
   if (!cid) return res.status(400).json({ error: 'chat_id required' });
   try {
-    switchSession.run(cid, session_id);
+    await db.switchSession(cid, session_id);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/set-session', express.json(), (req, res) => {
+app.post('/api/set-session', async (req, res) => {
   const { chat_id, session_id } = req.body;
   if (!chat_id || !session_id) {
     return res.status(400).json({ error: 'chat_id and session_id required' });
   }
   try {
-    const session = getSessionById.get(session_id);
-    if (!session) {
+    const result = await db.setSession(chat_id, session_id);
+    res.json(result);
+  } catch (e) {
+    if (e.message.includes('404')) {
       return res.status(404).json({ error: 'Session not found' });
     }
-    setActiveSession.run(chat_id, session_id);
-    let ocRow = getOpenCodeSessionId.get(session_id);
-    let opencode_session_id = ocRow ? ocRow.opencode_session_id : null;
-    
-    // Share Telegram session's OpenCode session for continuity
-    if (!opencode_session_id) {
-      const telRow = db.prepare(
-        `SELECT opencode_session_id FROM sessions
-         WHERE chat_id = ? AND opencode_session_id IS NOT NULL
-         ORDER BY updated_at DESC LIMIT 1`
-      ).get(chat_id);
-      if (telRow && telRow.opencode_session_id) {
-        setOpenCodeSessionId.run(telRow.opencode_session_id, session_id);
-        opencode_session_id = telRow.opencode_session_id;
-      }
-    }
-    
-    res.json({
-      opencode_session_id,
-      session: {
-        id: session.id,
-        title: session.title,
-        chat_id: session.chat_id,
-      }
-    });
-  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/api/messages', (req, res) => {
+app.get('/api/messages', async (req, res) => {
   const sessionId = req.query.session_id;
   const limit = parseInt(req.query.limit) || 50;
   if (!sessionId) return res.status(400).json({ error: 'session_id required' });
   try {
-    const msgs = getMessages.all(sessionId, limit);
+    const msgs = await db.getMessages(sessionId, limit);
     res.json(msgs);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/summarize', express.json(), async (req, res) => {
+app.post('/api/summarize', async (req, res) => {
   const { session_id } = req.body;
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
   try {
-    const msgs = getMessages.all(session_id, 50);
+    const msgs = await db.getMessages(session_id, 50);
     const history = msgs.map(m => `${m.sender === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n');
     const ocSid = await createOpenCodeSession();
     const result = await callOpenCode(`Summarize this conversation concisely:\n\n${history}`, ocSid);
-    const now = Date.now() / 1000;
-    updateSummary.run(result.text, now, session_id);
+    await db.setSummary(session_id, result.text);
     res.json({ summary: result.text });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/clear', express.json(), (req, res) => {
+app.post('/api/clear', async (req, res) => {
   const { session_id } = req.body;
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
   try {
-    deleteMessages.run(session_id);
+    await db.clearMessages(session_id);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -179,27 +153,26 @@ app.get('/api/models', async (req, res) => {
     const r = await fetch(`${OPENCODE_URL}/provider`);
     if (!r.ok) return res.status(502).json({ error: 'OpenCode unavailable' });
     const data = await r.json();
-    
-    // data has: { all: [...], connected: [...] }
+
     const allProviders = data.all || [];
     const connectedIds = data.connected || [];
-    
+
     const validProviders = [];
     for (const p of allProviders) {
       const pId = p.id;
       const isAccessible = connectedIds.includes(pId);
       const models = p.models || {};
-      
+
       const providerModels = [];
       for (const [mid, mData] of Object.entries(models)) {
-        const isFree = mid.toLowerCase().includes(':free') || 
-                       (mData.name || '').toLowerCase().includes('free') || 
+        const isFree = mid.toLowerCase().includes(':free') ||
+                       (mData.name || '').toLowerCase().includes('free') ||
                        pId === 'opencode';
-        
+
         if (isAccessible || isFree) {
           let label = mData.name || mid;
           label = label.replace('-latest', '').replace('-pro', ' Pro').replace('-lite', ' Lite').replace('-flash', ' Flash');
-          
+
           providerModels.push({
             id: `${pId}/${mid}`,
             pid: pId,
@@ -209,7 +182,7 @@ app.get('/api/models', async (req, res) => {
           });
         }
       }
-      
+
       if (providerModels.length > 0) {
         providerModels.sort((a, b) => (a.is_free === b.is_free ? 0 : a.is_free ? -1 : 1));
         validProviders.push({
@@ -219,80 +192,66 @@ app.get('/api/models', async (req, res) => {
         });
       }
     }
-    
-    // Ensure 'opencode' is always first
+
     validProviders.sort((a, b) => (a.id === 'opencode' ? -1 : b.id === 'opencode' ? 1 : 0));
-    
+
     res.json({ providers: validProviders, connected: connectedIds });
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
 });
 
-app.get('/api/agents', (req, res) => {
-  const chatId = resolveChatId(parseInt(req.query.chat_id));
+app.get('/api/agents', async (req, res) => {
+  const chatId = await db.resolveChatId(parseInt(req.query.chat_id));
   if (!chatId) return res.json([]);
   try {
-    const rows = db.prepare(
-      'SELECT agent_id, name, description, system_prompt FROM user_agents WHERE chat_id = ? ORDER BY created_at DESC'
-    ).all(chatId);
-    res.json(rows.map(r => ({
-      agent_id: r.agent_id,
-      name: r.name,
-      description: r.description || '',
-      system_prompt: r.system_prompt || '',
-    })));
+    const agents = await db.listAgents(chatId);
+    res.json(agents);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/create-agent', express.json(), (req, res) => {
+app.post('/api/create-agent', async (req, res) => {
   const { chat_id, name, description, system_prompt } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   try {
-    const now = Date.now() / 1000;
-    const uid = resolveChatId(chat_id) || 0;
-    if (!uid) return res.status(400).json({ error: 'chat_id required' });
-    db.prepare(
-      'INSERT INTO user_agents (chat_id, user_id, name, description, system_prompt, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(uid, uid, name, description || '', system_prompt || '', now);
+    const cid = await db.resolveChatId(chat_id);
+    if (!cid) return res.status(400).json({ error: 'chat_id required' });
+    await db.createAgent(cid, name, description, system_prompt);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/update-agent', express.json(), (req, res) => {
+app.post('/api/update-agent', async (req, res) => {
   const { agent_id, name, description, system_prompt } = req.body;
   if (!agent_id || !name) return res.status(400).json({ error: 'agent_id and name required' });
   try {
-    db.prepare(
-      'UPDATE user_agents SET name = ?, description = ?, system_prompt = ? WHERE agent_id = ?'
-    ).run(name, description || '', system_prompt || '', agent_id);
+    await db.updateAgent(agent_id, name, description, system_prompt);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/delete-agent', express.json(), (req, res) => {
+app.post('/api/delete-agent', async (req, res) => {
   const { agent_id } = req.body;
   if (!agent_id) return res.status(400).json({ error: 'agent_id required' });
   try {
-    db.prepare('DELETE FROM user_agents WHERE agent_id = ?').run(agent_id);
+    await db.deleteAgent(agent_id);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/generate-agent-prompt', express.json(), async (req, res) => {
+app.post('/api/generate-agent-prompt', async (req, res) => {
   const { description } = req.body;
   if (!description) return res.status(400).json({ error: 'description required' });
   try {
-    // Generate a structured prompt template locally instead of calling OpenCode
-    const systemPrompt = `You are ${description}. 
+    const systemPrompt = `You are ${description}.
 
 Your role and guidelines:
 - Act as: ${description}
@@ -309,25 +268,28 @@ Remember your identity and purpose in every interaction.`;
   }
 });
 
-app.post('/api/set-title', express.json(), (req, res) => {
+app.post('/api/set-title', async (req, res) => {
   const { session_id, title } = req.body;
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
   try {
-    updateTitle.run(title, Date.now() / 1000, session_id);
+    await db.setTitle(session_id, title);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/switch-model', express.json(), async (req, res) => {
+app.post('/api/switch-model', async (req, res) => {
   const { session_id, provider, model } = req.body;
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
   try {
     const parts = (model || 'big-pickle').split('/');
     const bareModelId = parts.pop();
     const providerId = provider || parts.pop() || 'opencode';
-    const payload = { model: { id: bareModelId, providerID: providerId } };
+    const payload = {
+      model: { id: bareModelId, providerID: providerId },
+      agent: 'build'
+    };
     const r = await fetch(`${OPENCODE_URL}/session`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
     });
@@ -338,7 +300,7 @@ app.post('/api/switch-model', express.json(), async (req, res) => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messageID: initMsgId, modelID: bareModelId, providerID: providerId })
     });
-    db.prepare('UPDATE sessions SET opencode_session_id = ?, updated_at = ? WHERE id = ?').run(newOcSid, Date.now() / 1000, session_id);
+    await db.switchModel(session_id, newOcSid);
     res.json({ opencode_session_id: newOcSid });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -353,9 +315,10 @@ function generateTitle(firstMessage) {
   return words.slice(0, 6).join(' ') + '…';
 }
 
-async function createOpenCodeSession(modelId = 'qwen3.6-plus-free', providerId = 'opencode') {
+async function createOpenCodeSession(modelId = 'qwen3.6-plus-free', providerId = 'opencode', agent = 'build') {
   const payload = {
-    model: { id: modelId, providerID: providerId }
+    model: { id: modelId, providerID: providerId },
+    agent: agent === 'default' ? 'build' : agent
   };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
@@ -371,7 +334,7 @@ async function createOpenCodeSession(modelId = 'qwen3.6-plus-free', providerId =
     }
     const data = await r.json();
     const sessionId = data.id;
-    console.log('[OpenCode] Created session:', sessionId, 'model:', modelId);
+    console.log('[OpenCode] Created session:', sessionId, 'model:', modelId, 'agent:', payload.agent);
     return sessionId;
   } catch (e) {
     clearTimeout(timeout);
@@ -381,16 +344,16 @@ async function createOpenCodeSession(modelId = 'qwen3.6-plus-free', providerId =
 
 async function callOpenCode(text, sessionId, mode = 'execute', agent = 'default', chatId = null, onReasoning = null, modelId = null, providerId = null) {
   const systemPrompt = buildSystemPrompt(mode, agent, chatId, sessionId);
-  
+
   const payload = {
     parts: [
       { type: 'text', text: systemPrompt, synthetic: true },
       { type: 'text', text }
     ]
   };
-  
+
   console.log('[OpenCode] Sending to session:', sessionId);
-  
+
   async function doSend(sid, timeoutMs = 15000) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -407,37 +370,33 @@ async function callOpenCode(text, sessionId, mode = 'execute', agent = 'default'
       return null;
     }
   }
-  
+
   let r = await doSend(sessionId);
-  
+
   if (r && r.status === 404) {
     console.log('[OpenCode] Session not found, creating new one...');
-    sessionId = await createOpenCodeSession(modelId || 'qwen3.6-plus-free', providerId || 'opencode');
+    sessionId = await createOpenCodeSession(modelId || 'qwen3.6-plus-free', providerId || 'opencode', agent);
     r = await doSend(sessionId);
   }
-  
-  // 500 with a recoverable model → create new session and retry
+
   if (r && r.status === 500 && modelId) {
     console.log('[OpenCode] Session 500, creating new session with model:', modelId);
-    sessionId = await createOpenCodeSession(modelId, providerId);
+    sessionId = await createOpenCodeSession(modelId, providerId, agent);
     r = await doSend(sessionId, 30000);
   }
-  
-  // Abort/timeout (null r) on a fresh session → retry with longer timeout once
+
   if (!r && modelId) {
     console.log('[OpenCode] doSend aborted, retrying with 30s timeout...');
     r = await doSend(sessionId, 30000);
   }
-  
-  // Timeout (null r) is not an error — fall through to polling
+
   if (r && !r.ok) {
     const status = r.status;
     const errText = await r.text().catch(() => '');
     console.log('[OpenCode] Prompt failed:', status, errText.slice(0, 300));
     return { text: `Error: opencode returned status ${status} - ${errText.slice(0, 200)}`, reasoning: '', sessionId };
   }
-  
-  // Try to extract response from the immediate POST response first
+
   if (r) {
     try {
       console.log('[OpenCode] Parsing POST response...');
@@ -452,17 +411,16 @@ async function callOpenCode(text, sessionId, mode = 'execute', agent = 'default'
       console.log('[OpenCode] Could not parse POST response:', e.message);
     }
   }
-  
-  // Poll for response
+
   const deadline = Date.now() + 60000;
   const pollInterval = 1500;
   let lastReasoning = '';
-  
+
   console.log('[OpenCode] Polling for response...');
-  
+
   while (Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, pollInterval));
-    
+
     try {
       const controller = new AbortController();
       const pollTimeout = setTimeout(() => controller.abort(), 5000);
@@ -470,15 +428,14 @@ async function callOpenCode(text, sessionId, mode = 'execute', agent = 'default'
         signal: controller.signal
       });
       clearTimeout(pollTimeout);
-      
+
       if (!mr.ok) continue;
-      
+
       const messages = await mr.json();
       if (!messages || messages.length === 0) continue;
-      
+
       const msg = messages[messages.length - 1];
-      
-      // Emit live reasoning updates
+
       if (onReasoning) {
         let reasoning = '';
         for (const p of (msg.parts || [])) {
@@ -489,10 +446,10 @@ async function callOpenCode(text, sessionId, mode = 'execute', agent = 'default'
           lastReasoning = reasoning;
         }
       }
-      
+
       const info = msg.info || {};
       if (info.role !== 'assistant') continue;
-      
+
       const result = extractResponse(msg);
       if (result.text) {
         console.log('[OpenCode] Response from poll:', result.text.slice(0, 100));
@@ -502,7 +459,7 @@ async function callOpenCode(text, sessionId, mode = 'execute', agent = 'default'
       console.log('[OpenCode] Poll error:', e.message);
     }
   }
-  
+
   console.log('[OpenCode] Poll timeout');
   return { text: '(Response timed out)', reasoning: '', sessionId };
 }
@@ -510,23 +467,20 @@ async function callOpenCode(text, sessionId, mode = 'execute', agent = 'default'
 function extractResponse(msg) {
   const parts = msg.parts || [];
   const info = msg.info || {};
-  
-  // Check for error parts
+
   const errorParts = parts.filter(p => p.type === 'error');
   if (errorParts.length > 0) {
     const errorMsg = errorParts[0].message || 'Unknown error';
     return { text: `Error: ${errorMsg}`, reasoning: '' };
   }
-  
-  // Extract reasoning/thinking
+
   let reasoning = '';
   for (const p of parts) {
     if (p.type === 'reasoning' && p.text) {
       reasoning += p.text;
     }
   }
-  
-  // Extract text parts (skip synthetic)
+
   const textParts = [];
   for (const p of parts) {
     if (p.synthetic) continue;
@@ -534,18 +488,17 @@ function extractResponse(msg) {
       textParts.push(p.text);
     }
   }
-  
+
   const responseText = textParts.join('\n').trim();
-  
-  // Check if complete
+
   const hasFinish = parts.some(p => p.type === 'step-finish');
   const finishReason = info.finish;
   const isComplete = hasFinish || ['stop', 'error', 'length'].includes(finishReason);
-  
+
   if (isComplete || responseText) {
     return { text: responseText || '(no response)', reasoning };
   }
-  
+
   return { text: '', reasoning };
 }
 
@@ -560,29 +513,26 @@ io.on('connection', (socket) => {
 
   socket.on('user_message', async (data) => {
     const text = data.text;
-    const chatId = resolveChatId(data.chat_id) || activeChatId;
+    const chatId = await db.resolveChatId(data.chat_id) || activeChatId;
     const sid = data.session_id || activeSessionId;
     const model = data.model;
-    // Cache chat_id for this socket session
     if (chatId) activeChatId = chatId;
     if (!sid) return socket.emit('error', { message: 'No active session' });
 
     console.log('[Socket] user_message:', text.slice(0, 50), 'session:', sid, 'model:', model);
 
-    const now = Date.now() / 1000;
-    addMessageStmt.run(sid, 'user', text, now, 'webchat');
-    updateSessionTime.run(now, sid);
-    io.emit('message', { id: now, role: 'user', text, time: new Date().toISOString(), session_id: sid });
+    await db.addMessage(sid, 'user', text, 'webchat');
+    io.emit('message', { id: Date.now() / 1000, role: 'user', text, time: new Date().toISOString(), session_id: sid });
     io.emit('bmo_status', { status: 'typing' });
 
     // Auto-title on 2nd message
     try {
-      const msgCount = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?').get(sid);
+      const msgCount = await db.getMessageCount(sid);
       if (msgCount.cnt === 2) {
-        const msgs = getMessages.all(sid, 2);
+        const msgs = await db.getMessages(sid, 2);
         const firstMsg = msgs[0]?.content || text;
         const title = generateTitle(firstMsg);
-        updateTitle.run(title, now, sid);
+        await db.setTitle(sid, title);
         io.emit('session_title_updated', { session_id: sid, title });
       }
     } catch (e) {
@@ -590,10 +540,10 @@ io.on('connection', (socket) => {
     }
 
     try {
-      const row = getOpenCodeSessionId.get(sid);
-      let ocSid = row ? row.opencode_session_id : null;
+      const ocResult = await db.getOpenCodeSessionId(sid);
+      let ocSid = ocResult ? ocResult.opencode_session_id : null;
       console.log('[Socket] OpenCode session ID from DB:', ocSid);
-      
+
       let modelId = 'qwen3.6-plus-free';
       let providerId = 'opencode';
       if (model) {
@@ -601,26 +551,25 @@ io.on('connection', (socket) => {
         modelId = parts.pop();
         providerId = parts.pop() || 'opencode';
       }
-      
+
       if (!ocSid) {
         console.log('[Socket] No OpenCode session, creating new one with model:', modelId);
         ocSid = await createOpenCodeSession(modelId, providerId);
-        setOpenCodeSessionId.run(ocSid, sid);
+        await db.setOpenCodeSessionId(ocSid, sid);
         console.log('[Socket] Saved OpenCode session:', ocSid);
       }
-      
+
       const result = await callOpenCode(text, ocSid, 'execute', 'default', chatId, (reasoning) => {
         io.emit('reasoning', { text: reasoning, session_id: sid });
       }, modelId, providerId);
-      
-      // Save new sessionId if callOpenCode recovered from 500/404
+
       if (result && result.sessionId && result.sessionId !== ocSid) {
-        setOpenCodeSessionId.run(result.sessionId, sid);
+        await db.setOpenCodeSessionId(result.sessionId, sid);
         console.log('[Socket] Updated OpenCode session after recovery:', result.sessionId);
       }
       const responseText = result.text;
       const reasoningText = result.reasoning || '';
-      addMessageStmt.run(sid, 'bmo', responseText, Date.now() / 1000, 'webchat');
+      await db.addMessage(sid, 'bmo', responseText, 'webchat');
       io.emit('message', {
         id: Date.now() / 1000, role: 'bmo', text: responseText, reasoning: reasoningText,
         time: new Date().toISOString(), session_id: sid,

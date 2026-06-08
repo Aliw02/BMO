@@ -1,0 +1,60 @@
+{
+  "name": "@aliwey/bmo",
+  "version": "2.1.18",
+  "description": "BMO — AI coding assistant with Telegram, CLI & Web sync. One command, all frontends.",
+  "keywords": [
+    "ai",
+    "coding-assistant",
+    "telegram-bot",
+    "cli",
+    "opencode",
+    "bfp"
+  ],
+  "homepage": "https://github.com/Aliw02/BMO",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aliw02/BMO.git"
+  },
+  "license": "MIT",
+  "author": "Aliwey",
+  "bin": {
+    "bmo": "bin/bmo.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "opencode-ai": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "opencode-ai": {
+      "optional": true
+    }
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "registry/",
+    "core/",
+    "handlers/",
+    "config/",
+    "models/",
+    "storage/",
+    "tools/",
+    "webchat/",
+    "!webchat/node_modules/",
+    "!webchat/server.pid",
+    "!webchat/server_err.txt",
+    "!webchat/server_out.txt",
+    "!webchat/server_test.log",
+    "!webchat/server_test_err.log",
+    "requirements.txt",
+    "setup.py",
+    "main.py",
+    "cli.py",
+    "memory.md"
+  ]
+}

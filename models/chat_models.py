@@ -90,6 +90,26 @@ class ChatSession:
     def get_summary(self) -> Optional[str]:
         return self.metadata.get("session_summary")
 
+    def set_description(self, description: str):
+        self.metadata["session_description"] = description
+        self.updated_at = datetime.now().timestamp()
+
+    def get_description(self) -> Optional[str]:
+        return self.metadata.get("session_description")
+
+    def get_message_counter(self) -> int:
+        return self.metadata.get("message_counter", 0)
+
+    def increment_message_counter(self) -> int:
+        count = self.metadata.get("message_counter", 0) + 1
+        self.metadata["message_counter"] = count
+        self.updated_at = datetime.now().timestamp()
+        return count
+
+    def reset_message_counter(self):
+        self.metadata["message_counter"] = 0
+        self.updated_at = datetime.now().timestamp()
+
 
 @dataclass
 class UserMemory:

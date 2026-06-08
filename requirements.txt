@@ -5,3 +5,10 @@ cryptography>=42.0.0
 fastapi>=0.100.0
 uvicorn>=0.22.0
 mcp>=1.0.0
+prompt-toolkit>=3.0
+rich>=13.0
+psutil
+watchfiles
+PyNaCl>=1.5.0
+base58>=2.1.0
+websockets>=13.0

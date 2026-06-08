@@ -22,6 +22,7 @@ Uses persistent ReplyKeyboard instead of slash commands.
 """
 
 import asyncio
+import atexit
 import logging
 import httpx
 import os
@@ -33,17 +34,20 @@ from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
-from config.settings import CHUNK_SIZE, ALLOWED_USER_IDS, OPENCODE_BASE_URL, DATA_DIR
+from config.settings import CHUNK_SIZE, ALLOWED_USER_IDS, OWNER_ID, OPENCODE_BASE_URL, DATA_DIR
 from core.bot_client import OpenCodeBotClient
 from models.chat_models import ChatSession
 from storage.storage import get_storage
 from core.shared_state import pending_permissions
+from core.bmo_engine import BMOEngine
 
 
 logger = logging.getLogger(__name__)
 
-opencode_client = OpenCodeBotClient()
-storage = get_storage()
+engine = BMOEngine()
+opencode_client = engine.client
+storage = engine.storage
+atexit.register(engine.shutdown)
 
 # Ensure downloads directory exists
 DOWNLOADS_DIR = DATA_DIR / "downloads"
@@ -259,8 +263,7 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 System Statistics", callback_data="admin_stats")]
     ]
     
-    # Only show admin stats to owner (Aliwi)
-    if user.id != 732356803:
+    if user.id != OWNER_ID:
         kb = [kb[0]]
         
     await update.message.reply_text(
@@ -851,7 +854,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "set_keys":
         await handle_key_management(update, context)
     elif data == "admin_stats":
-        if user_id != 732356803: return
+        if user_id != OWNER_ID: return
         stats = storage.get_stats()
         is_oc_up = "✅ Connected" if opencode_client.is_connected else "❌ Disconnected"
         text = (
@@ -865,7 +868,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_settings")]]), parse_mode=ParseMode.HTML)
     elif data == "back_settings":
         kb = [[InlineKeyboardButton("🔑 Manage API Keys", callback_data="set_keys")], [InlineKeyboardButton("📊 System Statistics", callback_data="admin_stats")]]
-        if user_id != 732356803: kb = [kb[0]]
+        if user_id != OWNER_ID: kb = [kb[0]]
         await query.edit_message_text("⚙️ <b>BMO Settings</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
     elif data.startswith("setup_p_"):
         provider_id = data.replace("setup_p_", "")
@@ -1218,24 +1221,26 @@ def _sanitize_for_telegram(text: str) -> str:
 
 
 async def _send_safe(send_func, text: str, parse_mode=None):
-    """Try MarkdownV2 first, then HTML, then plain text."""
+    """Try HTML first, then MarkdownV2, then plain text."""
     if parse_mode:
         try:
             await send_func(text, parse_mode=parse_mode)
             return
         except Exception:
             pass
+    try:
+        safe = _sanitize_for_telegram(text)
+        await send_func(safe, parse_mode=ParseMode.HTML)
+        return
+    except Exception:
+        pass
     if not parse_mode or parse_mode != ParseMode.MARKDOWN_V2:
         try:
             await send_func(text, parse_mode=ParseMode.MARKDOWN_V2)
             return
         except Exception:
             pass
-    try:
-        safe = _sanitize_for_telegram(text)
-        await send_func(safe, parse_mode=ParseMode.HTML)
-    except Exception:
-        await send_func(text)
+    await send_func(text)
 
 
 async def _send_chunks(update: Update, context: ContextTypes.DEFAULT_TYPE, waiting_msg, text: str) -> None:
@@ -1254,14 +1259,14 @@ async def _send_chunks(update: Update, context: ContextTypes.DEFAULT_TYPE, waiti
             await send_func(first_chunk)
             return True
 
-    if not await _send(chunks[0], edit, ParseMode.MARKDOWN_V2):
-        safe = _sanitize_for_telegram(chunks[0])
-        if not await _send(safe, edit, ParseMode.HTML):
+    safe = _sanitize_for_telegram(chunks[0])
+    if not await _send(safe, edit, ParseMode.HTML):
+        if not await _send(chunks[0], edit, ParseMode.MARKDOWN_V2):
             await _send(chunks[0], edit, None)
     for chunk in chunks[1:]:
-        if not await _send(chunk, reply, ParseMode.MARKDOWN_V2):
-            safe = _sanitize_for_telegram(chunk)
-            if not await _send(safe, reply, ParseMode.HTML):
+        safe = _sanitize_for_telegram(chunk)
+        if not await _send(safe, reply, ParseMode.HTML):
+            if not await _send(chunk, reply, ParseMode.MARKDOWN_V2):
                 await _send(chunk, reply, None)
     
     # Check if the text contains a file path to send
@@ -1379,7 +1384,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"⚡ <b>BMO online, {name}!</b>{continuity}\n\n"
         "أنا جاهز لمساعدتك، اطلب أي شي أو ارسل ملفاتك للتحليل!"
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=MAIN_MENU_KEYBOARD)
+    
+    from tools.task_registry import check_port_conflict
+    conflict = check_port_conflict(3456)
+    webchat_btn = (
+        InlineKeyboardButton("⏹ Stop Webchat", callback_data="action:stop_webchat")
+        if conflict
+        else InlineKeyboardButton("🌐 Chat on Web", callback_data="action:launch_webchat")
+    )
+    inline_kb = InlineKeyboardMarkup([
+        [webchat_btn],
+        [InlineKeyboardButton("⚡ Open Menu", callback_data="back_to_menu")]
+    ])
+    
+    # Send a dummy/activation message for reply keyboard to make sure it's active
+    await update.message.reply_text("🦾 BMO controls activated.", reply_markup=MAIN_MENU_KEYBOARD)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=inline_kb)
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1780,7 +1800,7 @@ async def choose_model_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_use_skill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        async with httpx.AsyncClient(base_url=OPENCODE_BASE_URL, timeout=10) as client:
+        async with httpx.AsyncClient(base_url=OPENCODE_BASE_URL, timeout=10, trust_env=False) as client:
             r = await client.get("/agent")
             agents = r.json() if r.status_code == 200 else []
     except Exception:
@@ -1870,14 +1890,28 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = query.message.chat_id
     await query.answer('Cancelling...')
     try:
-        await query.edit_message_text('❌ <b>Cancelled</b>', parse_mode=ParseMode.HTML)
+        await query.edit_message_text('⏹️ <b>Stopped</b>\n<i>Request cancelled — OpenCode stream aborted.</i>', parse_mode=ParseMode.HTML)
     except: pass
+
+    # Cancel the asyncio task
     task = _running_tasks.get(chat_id)
-    if task and not task.done(): task.cancel()
+    if task and not task.done():
+        task.cancel()
     if chat_id in _file_tasks:
         for t in _file_tasks[chat_id]:
             if not t.done(): t.cancel()
         _file_tasks.pop(chat_id, None)
+
+    # ── Abort the OpenCode server-side stream ──
+    # This is the critical step that stops the LLM from continuing to run
+    session = storage.load_session(chat_id)
+    opencode_sid = session.metadata.get("opencode_session_id") if session else None
+    if opencode_sid:
+        try:
+            aborted = await opencode_client.abort_session(opencode_sid)
+            logger.info("Telegram cancel: abort_session(%s) -> %s", opencode_sid, aborted)
+        except Exception as e:
+            logger.warning("Telegram cancel: abort_session failed: %s", e)
 
 
 # ── Auto Summary ────────────────────────────────────────────────────────────
@@ -1932,10 +1966,65 @@ def _schedule_auto_summary(chat_id: int, session: ChatSession, bot):
     _summary_timers[chat_id] = task
 
 
+MESSAGE_COUNTER_THRESHOLD = 7
+
+
+async def _check_message_counter_summary(session: ChatSession, bot, chat_id: int):
+    """If message counter >= threshold, generate summary and reset counter."""
+    count = session.get_message_counter()
+    if count < MESSAGE_COUNTER_THRESHOLD:
+        return
+
+    history = session.get_context_text(max_messages=100)
+    prompt = (
+        "Based on this conversation history:\n"
+        f"{history}\n\n"
+        "1. Provide a concise summary of the work done.\n"
+        "2. Suggest a short 3-4 word title for this session.\n\n"
+        "Format your response exactly as:\n"
+        "SUMMARY: [summary text]\n"
+        "TITLE: [suggested title]"
+    )
+    response = await opencode_client.send_query(prompt, active_mode="ask", chat_id=chat_id)
+    if response and not response.startswith("Error"):
+        summary = response
+        title = None
+
+        if "SUMMARY:" in response:
+            summary = response.split("SUMMARY:")[1]
+            if "TITLE:" in summary:
+                summary, title = summary.split("TITLE:", 1)
+                summary = summary.strip()
+                title = title.strip()
+            else:
+                summary = summary.strip()
+
+        session.set_summary(summary)
+        session.set_description(summary)
+        if title:
+            session.set_title(title)
+        storage.save_session(session)
+
+        short = summary[:250] + "…" if len(summary) > 250 else summary
+        title_info = f" 🏷️ <b>{title}</b>" if title else ""
+        await _send_safe(
+            lambda text, pm=None: bot.send_message(chat_id=chat_id, text=text, parse_mode=pm),
+            f"📝 <b>Auto-Summary</b> (every {MESSAGE_COUNTER_THRESHOLD} messages){title_info}\n\n{short}",
+            parse_mode=ParseMode.HTML,
+        )
+
+    session.reset_message_counter()
+    storage.save_session(session)
+
+
 # ── CORE HANDLERS ─────────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Main text message handler."""
+    # Guard: ignore non-message updates (edits, channel posts, etc.)
+    if not update.message or not update.message.text:
+        return
+
     chat_id = update.effective_chat.id
     user = update.effective_user
     text = update.message.text
@@ -2297,6 +2386,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     storage.add_message(chat_id, "user", text, interface='telegram')
+    session.increment_message_counter()
 
     # ── Handle title-waiting mode ──
     if chat_id in _awaiting_title:
@@ -2339,6 +2429,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pass
         await _send_chunks(update, context, waiting_msg, response)
         storage.add_message(chat_id, "assistant", response, interface='telegram')
+        asyncio.create_task(_check_message_counter_summary(session, context.bot, chat_id))
         return
 
     # ── Thinking Phase ──
@@ -2354,7 +2445,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             agent_info = storage.get_custom_agent_by_id(agent_id)
         except: pass
 
-    query_with_context = f"Previous context for continuity:\n{history_messages}\n\nLatest User Message: {text}"
+    query_with_context = f"[Message Source: TELEGRAM]\nPrevious context for continuity:\n{history_messages}\n\nLatest User Message: {text}"
     if agent_info:
         query_with_context = f"[CUSTOM AGENT SYSTEM PROMPT: {agent_info['system_prompt']}]\n\n{query_with_context}"
 
@@ -2383,7 +2474,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             stop_event.set()
             await poller_task
             await _send_chunks(update, context, waiting_msg, response)
-            # _schedule_auto_summary(chat_id, session, context.bot)
+            asyncio.create_task(_check_message_counter_summary(session, context.bot, chat_id))
         except asyncio.CancelledError:
             stop_event.set()
             await poller_task
@@ -2507,6 +2598,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     session = _ensure_session(chat_id, user.id, user.username)
     caption = msg.caption or f"Please analyse this file: {file_name}"
+
+    # Load Context for Continuity (Last 5 messages only)
+    history_messages = session.get_context_text(max_messages=8)
+    query_with_context = f"[Message Source: TELEGRAM]\nPrevious context for continuity:\n{history_messages}\n\nLatest User Message: {caption}"
+
     storage.add_message(chat_id, "user", f"[File: {file_name}] {caption}", interface='telegram')
 
     stop_event = asyncio.Event()
@@ -2528,7 +2624,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     async def _process_file():
         try:
             response = await opencode_client.send_query(
-                caption,
+                query_with_context,
                 session_id=session.metadata.get("opencode_session_id"),
                 files=[{"path": str(local_path), "mime": mime_type}],
                 provider_id=provider_id,
@@ -2570,7 +2666,7 @@ async def handle_system_reload(update: Update, context: ContextTypes.DEFAULT_TYP
         from telegram import Bot
         bot = Bot(token=os.getenv("TELEGRAM_TOKEN", ""))
         await bot.send_message(
-            chat_id=732356803,
+            chat_id=OWNER_ID,
             text="🔄 <b>BMO is restarting with new buttons!</b>\n\nCheck your keyboard - new cleaner layout is ready!",
             parse_mode=ParseMode.HTML
         )

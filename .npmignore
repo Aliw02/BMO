@@ -1,0 +1,53 @@
+# Data & secrets
+data/
+logs/
+.env
+*.db
+*.db-shm
+*.db-wal
+.bot.lock
+
+# Dev-only
+BMO_Portable/
+BMO_Portable.zip
+archive/
+scratch/
+tests/
+docs/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Generated
+model_dump.json
+full_config*.json
+server_api.json
+bmo_session_*.json
+*.bak
+tunnel_cli.log
+tunnel_url.txt
+
+# Node modules
+node_modules
+
+# Webchat runtime
+webchat/bmo.db
+webchat/server.pid
+webchat/server.err
+webchat/server.out
+webchat/server.test.log
+
+# Opencode
+.opencode/
+opencode.json
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.gemini/
+.playwright-mcp/

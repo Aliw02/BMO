@@ -2,8 +2,25 @@
 Main entry point for the OpenCode Telegram Bot.
 """
 
-import logging
-import sys
+import logging, os, sys
+
+_BMO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _BMO_ROOT not in sys.path:
+    sys.path.insert(0, _BMO_ROOT)
+
+_PARENT_ROOT = os.path.dirname(_BMO_ROOT)
+if _PARENT_ROOT not in sys.path:
+    sys.path.insert(0, _PARENT_ROOT)
+
+try:
+    from config.settings import TELEGRAM_TOKEN, LOG_FORMAT, LOG_LEVEL
+except ImportError as exc:
+    print(f"FATAL: Cannot import config.settings — {exc}", file=sys.stderr)
+    print(f"  sys.path = {sys.path}", file=sys.stderr)
+    print(f"  _BMO_ROOT = {_BMO_ROOT}", file=sys.stderr)
+    print(f"  _PARENT_ROOT = {_PARENT_ROOT}", file=sys.stderr)
+    print("  Ensure you're running from the project root and config/settings.py exists.", file=sys.stderr)
+    sys.exit(1)
 
 from telegram import Update
 from telegram.ext import (
@@ -14,7 +31,6 @@ from telegram.ext import (
     filters,
 )
 
-from config.settings import TELEGRAM_TOKEN, LOG_FORMAT, LOG_LEVEL
 from handlers.messages import (
     start_command,
     menu_command,
