@@ -668,21 +668,56 @@ def print_session_history(session):
             print_assistant_message(content, elapsed_secs=None, agent_name=active_agent)
     console.print()
 
+_INTERACTIVE_SHELLS = {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+
 async def run_shell_command(cmd: str) -> str:
-    """Run a shell command, streaming output in real-time, returning full output with exit code."""
+    """Run a shell command, streaming output in real-time, returning full output with exit code.
+
+    Standalone shell names (!cmd, !powershell, !pwsh) open a new terminal window.
+    All other commands run inline with stdout captured and streamed.
+    """
     if not cmd:
         print_error("Empty shell command. Usage: !<command>")
         return ""
 
     console.print(f"  [bold green]> {cmd}[/bold green]")
 
+    # Detect standalone interactive shell — spawn a new terminal window
+    first_word = cmd.strip().split(maxsplit=1)[0].lower()
+    if first_word in _INTERACTIVE_SHELLS and len(cmd.strip().split()) == 1:
+        import subprocess, shutil
+        # Try shells in priority order: pwsh -> powershell -> cmd
+        fallback_chain = [
+            ("pwsh.exe", []),
+            ("powershell.exe", []),
+            ("cmd.exe", ["/k"]),
+        ]
+        launched = False
+        for exe, args in fallback_chain:
+            if shutil.which(exe):
+                subprocess.Popen(
+                    [exe] + args,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    close_fds=True,
+                )
+                msg = f"Opened {exe} in a new window."
+                console.print(f"  [green]{msg}[/green]")
+                launched = True
+                break
+        if not launched:
+            err = "No shell found (tried pwsh.exe, powershell.exe, cmd.exe)"
+            print_error(err)
+            return f"$ {cmd}\n[Error] {err}"
+        return f"$ {cmd}\n{msg}\n[Exit: 0]"
+
     buf = []
     shell = os.environ.get("COMSPEC", "cmd.exe")
     try:
         proc = await asyncio.create_subprocess_exec(
-            shell, "/c" if "cmd" in shell.lower() else "/c", cmd,
+            shell, "/c", cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.DEVNULL,
         )
     except FileNotFoundError:
         print_error(f"Shell not found: {shell}")
@@ -853,24 +888,9 @@ async def main():
             event.app.invalidate()
 
     # Storage for collapsed pastes: placeholder → full text
-    _paste_store: dict[str, str] = {}
-    _paste_counter = [0]
-    PASTE_COLLAPSE_THRESHOLD = 5  # lines
-
-    from prompt_toolkit.keys import Keys
-    @prompt_kb.add(Keys.BracketedPaste, eager=True)
-    def _handle_paste(event):
-        """Collapse large pastes into a [Pasted text #N +M lines] placeholder."""
-        data = event.data
-        lines = data.splitlines()
-        if len(lines) >= PASTE_COLLAPSE_THRESHOLD:
-            _paste_counter[0] += 1
-            n = _paste_counter[0]
-            placeholder = f"[Pasted text #{n} +{len(lines)} lines]"
-            _paste_store[placeholder] = data
-            event.app.current_buffer.insert_text(placeholder)
-        else:
-            event.app.current_buffer.insert_text(data)
+    # Uses module-level _paste_store / _paste_counter / PASTE_COLLAPSE_THRESHOLD
+    # defined at the top of this file. The get_boxed_input() handler also writes
+    # to the module-level store — removing local shadowing so expansion finds it.
 
     _PS = PromptSession  # shorthand for sub-prompts — each call creates a fresh instance
     _pending_inject: str = None  # holds mid-run injection text to send on next iteration
