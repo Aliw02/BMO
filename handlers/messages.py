@@ -34,12 +34,13 @@ from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
-from config.settings import CHUNK_SIZE, ALLOWED_USER_IDS, OWNER_ID, OPENCODE_BASE_URL, DATA_DIR
+from config.settings import CHUNK_SIZE, ALLOWED_USER_IDS, OWNER_ID, OPENCODE_BASE_URL, DATA_DIR, USER_FILE
 from core.bot_client import OpenCodeBotClient
 from models.chat_models import ChatSession
 from storage.storage import get_storage
 from core.shared_state import pending_permissions
 from core.bmo_engine import BMOEngine
+from core.profiler_engine import ProfilerEngine
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ engine = BMOEngine()
 opencode_client = engine.client
 storage = engine.storage
 atexit.register(engine.shutdown)
+
+profiler = ProfilerEngine(str(USER_FILE))
 
 # Ensure downloads directory exists
 DOWNLOADS_DIR = DATA_DIR / "downloads"
@@ -2017,6 +2020,43 @@ async def _check_message_counter_summary(session: ChatSession, bot, chat_id: int
     storage.save_session(session)
 
 
+async def _check_profiler(session: ChatSession, bot, chat_id: int):
+    """If profiler threshold is met, analyze conversation and update USER.md."""
+    count = session.get_message_counter()
+    if not profiler.should_run(chat_id, count):
+        return
+
+    messages = session.get_last_n_messages(2)
+    user_msg = ""
+    assistant_msg = ""
+    for m in messages:
+        if m.sender == "user":
+            user_msg = m.content
+        elif m.sender == "assistant":
+            assistant_msg = m.content
+
+    if not user_msg and not assistant_msg:
+        return
+
+    session_context = session.get_context_text(max_messages=20)
+    existing_profile = profiler.get_profile_content()
+
+    observation = await profiler.analyze_and_update(
+        chat_id=chat_id,
+        user_message=user_msg,
+        assistant_response=assistant_msg,
+        session_context=f"{existing_profile}\n\nRecent context:\n{session_context}",
+        opencode_client=opencode_client,
+    )
+
+    if observation:
+        profiler.write_observation(observation)
+        stable = profiler.extract_stable_observations(observation)
+        total = sum(len(v) for v in stable.values())
+        if total > 0:
+            logger.info("Profiler: recorded %d observation(s) for chat %s", total, chat_id)
+
+
 # ── CORE HANDLERS ─────────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2430,6 +2470,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _send_chunks(update, context, waiting_msg, response)
         storage.add_message(chat_id, "assistant", response, interface='telegram')
         asyncio.create_task(_check_message_counter_summary(session, context.bot, chat_id))
+        asyncio.create_task(_check_profiler(session, context.bot, chat_id))
         return
 
     # ── Thinking Phase ──
@@ -2475,6 +2516,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await poller_task
             await _send_chunks(update, context, waiting_msg, response)
             asyncio.create_task(_check_message_counter_summary(session, context.bot, chat_id))
+            asyncio.create_task(_check_profiler(session, context.bot, chat_id))
         except asyncio.CancelledError:
             stop_event.set()
             await poller_task

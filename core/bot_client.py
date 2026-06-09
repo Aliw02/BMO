@@ -14,7 +14,7 @@ from typing import Optional, Callable, Awaitable
 
 from core.worker_manager import WorkerManager
 
-from config.settings import OPENCODE_BASE_URL, OPENCODE_TIMEOUT, OPENCODE_POLL_INTERVAL, OPENCODE_POLL_TIMEOUT, MEMORY_FILE
+from config.settings import OPENCODE_BASE_URL, OPENCODE_TIMEOUT, OPENCODE_POLL_INTERVAL, OPENCODE_POLL_TIMEOUT, MEMORY_FILE, BMO_FILE, USER_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,10 @@ class OpenCodeBotClient:
         self._agents_cache: Optional[list] = None
         self._agents_cache_time: float = 0
         self._memory_path = str(MEMORY_FILE)
+        self._bmo_cache: Optional[str] = None
+        self._bmo_cache_time: float = 0
+        self._user_cache: Optional[str] = None
+        self._user_cache_time: float = 0
         self._worker: Optional[WorkerManager] = None
         self._last_alive_error: Optional[str] = None
 
@@ -293,6 +297,42 @@ class OpenCodeBotClient:
         self._memory_cache_time = now
         return self._memory_cache
 
+    async def _get_bmo_identity(self) -> str:
+        """Read BMO.md with caching."""
+        now = time.monotonic()
+        if hasattr(self, '_bmo_cache') and self._bmo_cache is not None and (now - self._bmo_cache_time) < self._CACHE_TTL:
+            return self._bmo_cache
+        try:
+            bmo_path = str(BMO_FILE)
+            if os.path.exists(bmo_path):
+                with open(bmo_path, "r", encoding="utf-8") as f:
+                    self._bmo_cache = f.read()
+            else:
+                self._bmo_cache = ""
+        except Exception as e:
+            logger.warning("Could not read BMO.md: %s", e)
+            self._bmo_cache = ""
+        self._bmo_cache_time = now
+        return self._bmo_cache
+
+    async def _get_user_profile(self) -> str:
+        """Read USER.md with caching."""
+        now = time.monotonic()
+        if hasattr(self, '_user_cache') and self._user_cache is not None and (now - self._user_cache_time) < self._CACHE_TTL:
+            return self._user_cache
+        try:
+            user_path = str(USER_FILE)
+            if os.path.exists(user_path):
+                with open(user_path, "r", encoding="utf-8") as f:
+                    self._user_cache = f.read()
+            else:
+                self._user_cache = ""
+        except Exception as e:
+            logger.warning("Could not read USER.md: %s", e)
+            self._user_cache = ""
+        self._user_cache_time = now
+        return self._user_cache
+
     async def _get_agents_cached(self) -> list:
         """Fetch agents/skills list with caching to avoid HTTP call on every message."""
         now = time.monotonic()
@@ -472,7 +512,15 @@ class OpenCodeBotClient:
         memory_block = f"\n\n[LONG-TERM MEMORY]\n{memory_content}\n[END MEMORY]" if memory_content else ""
         memory_instruction = _system_config["memory_instruction"]
 
-        full_system_context = system_base + memory_instruction + tool_instruction + chat_context + skills_block + memory_block + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + _system_config["anti_loop"] + agent_instruction
+        bmo_content = await self._get_bmo_identity()
+        bmo_block = f"\n\n[BMO IDENTITY]\n{bmo_content}\n[END BMO IDENTITY]" if bmo_content else ""
+        identity_instruction = _system_config.get("identity_instruction", "")
+
+        user_content = await self._get_user_profile()
+        user_block = f"\n\n[USER PROFILE]\n{user_content}\n[END USER PROFILE]" if user_content else ""
+        profile_instruction = _system_config.get("profile_instruction", "")
+
+        full_system_context = system_base + memory_instruction + identity_instruction + bmo_block + profile_instruction + user_block + tool_instruction + chat_context + skills_block + memory_block + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + _system_config["anti_loop"] + agent_instruction
 
         async def _do_send(sid):
             try:
@@ -823,7 +871,15 @@ class OpenCodeBotClient:
         memory_block = f"\n\n[LONG-TERM MEMORY]\n{memory_content}\n[END MEMORY]" if memory_content else ""
         memory_instruction = _system_config["memory_instruction"]
 
-        full_system_context = system_base + memory_instruction + tool_instruction + chat_context + skills_block + memory_block + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + anti_loop + agent_instruction
+        bmo_content = await self._get_bmo_identity()
+        bmo_block = f"\n\n[BMO IDENTITY]\n{bmo_content}\n[END BMO IDENTITY]" if bmo_content else ""
+        identity_instruction = _system_config.get("identity_instruction", "")
+
+        user_content = await self._get_user_profile()
+        user_block = f"\n\n[USER PROFILE]\n{user_content}\n[END USER PROFILE]" if user_content else ""
+        profile_instruction = _system_config.get("profile_instruction", "")
+
+        full_system_context = system_base + memory_instruction + identity_instruction + bmo_block + profile_instruction + user_block + tool_instruction + chat_context + skills_block + memory_block + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + anti_loop + agent_instruction
 
         payload = {
             "parts": [

@@ -89,6 +89,8 @@ USER_MEMORY_FILE = DATA_DIR / "user_memory.json"
 ACTIVE_SESSIONS_FILE = DATA_DIR / "active_sessions.json"
 DATABASE_FILE = DATA_DIR / "bot.db"
 MEMORY_FILE = DATA_DIR / "memory.md"
+BMO_FILE = BMO_HOME / "BMO.md"
+USER_FILE = BMO_HOME / "USER.md"
 
 MAX_HISTORY_PER_CHAT = 500
 MAX_CONTEXT_LENGTH = 32000
@@ -107,9 +109,9 @@ RETRY_DELAY = 2
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 # ── BFP (BMO Friendship Protocol) ─────────────────────────────────────────────
+# If set, connects to an external relay. Otherwise BMO auto-starts a local relay
+# on port 9753 (see core/bfp_agent.py).
 BFP_RELAY_URL = os.getenv("BFP_RELAY_URL") or None
-BFP_REGISTRY_URL = os.getenv(
-    "BFP_REGISTRY_URL", "https://bfp-registry.aliwey.workers.dev"
-)
+BFP_REGISTRY_URL = os.getenv("BFP_REGISTRY_URL") or None
 BFP_TRANSPORT_PORT = int(os.getenv("BFP_TRANSPORT_PORT", "8765"))
 BFP_A2A_PORT = int(os.getenv("BFP_A2A_PORT", "8766"))
