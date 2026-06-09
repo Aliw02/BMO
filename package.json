@@ -1,6 +1,6 @@
 {
   "name": "@aliwey/bmo",
-  "version": "2.1.19",
+  "version": "2.1.20",
   "description": "BMO — AI coding assistant with Telegram, CLI & Web sync. One command, all frontends.",
   "keywords": [
     "ai",
