@@ -1,6 +1,6 @@
 {
   "name": "@aliwey/bmo",
-  "version": "2.1.18",
+  "version": "2.1.19",
   "description": "BMO — AI coding assistant with Telegram, CLI & Web sync. One command, all frontends.",
   "keywords": [
     "ai",
@@ -46,6 +46,7 @@
     "tools/",
     "webchat/",
     "!webchat/node_modules/",
+    "skills/",
     "!webchat/server.pid",
     "!webchat/server_err.txt",
     "!webchat/server_out.txt",
