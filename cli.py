@@ -60,12 +60,15 @@ COMMAND_DESCRIPTIONS = {
     "/env": "Show environment info",
     "/exit": "Exit BMO CLI",
     "/goal": "Create and run goals",
+    "/generate-plugin": "Generate a BMO plugin from a description (/generate-plugin <description>)",
     "/help": "Show help information",
     "/interrupt": "Interrupt current request",
     "/model": "Switch AI model",
     "/new": "Start a new session",
     "/sessions": "List and manage sessions",
     "/share": "Share session context",
+    "/plugins": "List, enable, disable, and reload plugins (/plugins enable <name>)",
+    "/reload": "Hot-reload all plugins without restart",
     "/status": "Show system status",
     "/stop": "Stop current operation",
     "/web": "Start webchat server",
@@ -987,9 +990,13 @@ async def main():
                     print_info("  /status or /t    - Display server connection status and stats")
                     print_info("  /diagnose or /d  - Run full connection diagnostics (multi-endpoint)")
                     print_info("  /web             - Start/show webchat URL (Cloudflare tunnel)")
+                    print_info("  /plugins         - List, enable/disable plugins (/plugins enable <name>)")
+                    print_info("  /<pluginname>    - Run any loaded plugin directly (e.g. /sysmon cpu)")
+                    print_info("  /reload          - Hot-reload plugins without restarting bot")
                     print_info("  /goal <task>     - Run autonomous goal loop (parallel subagents)")
                     print_info("  /goal list       - List past goal results")
                     print_info("  /goal results <id> - View full details of a saved goal")
+                    print_info("  /generate-plugin - Generate a BMO plugin from natural language description")
                     print_info("  /budget <limit>  - Set session token cost budget limit in USD")
                     print_info("  /share           - Export current session as .txt or .json file")
                     print_info("  /bfp status      - Show BFP identity, capabilities, relay connection")
@@ -1520,8 +1527,74 @@ async def main():
                     print_success(f"Updated config: {key}={display_val} (saved to {env_path})")
                     continue
 
+                elif cmd == "/reload":
+                    from tools.plugin_loader import plugin_loader
+                    result = plugin_loader.reload()
+                    console.print("[bold cyan]🔄 Plugin Reload Complete[/bold cyan]")
+                    if result["loaded"]:
+                        console.print(f"  📥 New: [green]{', '.join(result['loaded'])}[/green]")
+                    if result["reloaded"]:
+                        console.print(f"  🔄 Updated: [yellow]{', '.join(result['reloaded'])}[/yellow]")
+                    if result["removed"]:
+                        console.print(f"  🗑️ Removed: [red]{', '.join(result['removed'])}[/red]")
+                    if result["errors"]:
+                        console.print(f"  ❌ Errors: [bold red]{', '.join(result['errors'])}[/bold red]")
+                    if not any(result.values()):
+                        console.print("  ℹ️ No changes detected.")
+                    continue
+
+                elif cmd == "/plugins":
+                    from tools.plugin_loader import plugin_loader
+                    arg = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
+                    if arg == "reload":
+                        result = plugin_loader.reload()
+                        console.print("[bold cyan]🔄 Plugins reloaded[/bold cyan]")
+                        for name in result.get("loaded", []):
+                            console.print(f"  📥 [green]{name}[/green] loaded")
+                        for name in result.get("reloaded", []):
+                            console.print(f"  🔄 [yellow]{name}[/yellow] reloaded")
+                    elif arg == "enable":
+                        sub_parts = cmd_parts[1].split(maxsplit=1)
+                        name = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+                        if plugin_loader.enable(name):
+                            console.print(f"[green]✅ {name} enabled[/green]")
+                        else:
+                            console.print(f"[red]❌ Plugin '{name}' not found.[/red]")
+                    elif arg == "disable":
+                        sub_parts = cmd_parts[1].split(maxsplit=1)
+                        name = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+                        if plugin_loader.disable(name):
+                            console.print(f"[yellow]⛔ {name} disabled[/yellow]")
+                        else:
+                            console.print(f"[red]❌ Plugin '{name}' not found.[/red]")
+                    else:
+                        if not plugin_loader.list():
+                            plugin_loader.discover()
+                        plugins = plugin_loader.list()
+                        if not plugins:
+                            console.print("[yellow]🔌 No plugins loaded.[/yellow]")
+                            console.print("Add .py files to tools/plugins/ and run /reload.")
+                        else:
+                            console.print("[bold cyan]🔌 Loaded Plugins:[/bold cyan]")
+                            for p in sorted(plugins, key=lambda x: x.name):
+                                status = "✅" if p.enabled else "⛔"
+                                console.print(f"  {status} [bold]{p.name}[/bold]: {p.description}")
+                    continue
+
                 else:
-                    print_error(f"Unknown command: {cmd}")
+                    # Check if command matches a plugin name — execute it
+                    from tools.plugin_loader import plugin_loader
+                    plugin = plugin_loader.get(cmd.lstrip("/"))
+                    if plugin and plugin.enabled:
+                        rest = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
+                        try:
+                            result = await plugin_loader.execute(cmd.lstrip("/"), category=rest or "all")
+                            console.print(f"[bold cyan]🔌 {plugin.name}[/bold cyan]")
+                            console.print(result)
+                        except Exception as e:
+                            print_error(f"Plugin error: {e}")
+                    else:
+                        print_error(f"Unknown command: {cmd}")
                 continue
 
             elif user_input.startswith("!"):
