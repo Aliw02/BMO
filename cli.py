@@ -135,6 +135,33 @@ completer = BMOCommandCompleter()
 _paste_store: dict[str, str] = {}
 _paste_counter = [0]
 PASTE_COLLAPSE_THRESHOLD = 5  # lines
+_PASTE_PATTERN = re.compile(r"\[Pasted ~(\d+) lines(?: #(\d+))?\]")
+
+def _expand_paste_markers(text: str) -> str:
+    """Expand any [Pasted ~N lines] placeholders back to full content.
+    Handles both exact-match and embedded-in-longer-text cases."""
+    if not _paste_store:
+        return text
+    if text in _paste_store:
+        return _paste_store.pop(text)
+    for placeholder, content in list(_paste_store.items()):
+        if placeholder in text:
+            text = text.replace(placeholder, content)
+            _paste_store.pop(placeholder, None)
+    return text
+
+def _collapse_paste(data: str) -> str:
+    """Collapse pasted text >= PASTE_COLLAPSE_THRESHOLD into a placeholder.
+    Stores the full text in module-level _paste_store.
+    Returns the placeholder string, or the original data if below threshold."""
+    lines = data.splitlines()
+    if len(lines) >= PASTE_COLLAPSE_THRESHOLD:
+        _paste_counter[0] += 1
+        n = _paste_counter[0]
+        placeholder = f"[Pasted ~{len(lines)} lines #{n}]"
+        _paste_store[placeholder] = data
+        return placeholder
+    return data
 
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.document import Document
@@ -145,8 +172,8 @@ class PasteLexer(Lexer):
             text = document.lines[lineno]
             parts = []
             last_idx = 0
-            # Matches pattern: [Pasted ~55 lines]
-            for match in re.finditer(r"\[Pasted ~\d+ lines\]", text):
+            # Matches pattern: [Pasted ~55 lines] or [Pasted ~55 lines #2]
+            for match in re.finditer(r"\[Pasted ~\d+ lines(?: #\d+)?\]", text):
                 start, end = match.span()
                 if start > last_idx:
                     parts.append(("", text[last_idx:start]))
@@ -543,15 +570,8 @@ async def get_boxed_input(session, model_id: str, is_online: bool, agent_names: 
     @kb.add(Keys.BracketedPaste, eager=True)
     def _handle_paste_boxed(event):
         data = event.data
-        lines = data.splitlines()
-        if len(lines) >= PASTE_COLLAPSE_THRESHOLD:
-            _paste_counter[0] += 1
-            n = _paste_counter[0]
-            placeholder = f"[Pasted ~{len(lines)} lines]"
-            _paste_store[placeholder] = data
-            event.app.current_buffer.insert_text(placeholder)
-        else:
-            event.app.current_buffer.insert_text(data)
+        text = _collapse_paste(data)
+        event.app.current_buffer.insert_text(text)
 
     @kb.add("c-n", eager=True)
     def _cycle_agent_inner(event):
@@ -887,10 +907,8 @@ async def main():
             sys.stdout.flush()
             event.app.invalidate()
 
-    # Storage for collapsed pastes: placeholder → full text
     # Uses module-level _paste_store / _paste_counter / PASTE_COLLAPSE_THRESHOLD
-    # defined at the top of this file. The get_boxed_input() handler also writes
-    # to the module-level store — removing local shadowing so expansion finds it.
+    # defined at the top of this file. get_boxed_input() writes to the same store.
 
     _PS = PromptSession  # shorthand for sub-prompts — each call creates a fresh instance
     _pending_inject: str = None  # holds mid-run injection text to send on next iteration
@@ -910,13 +928,32 @@ async def main():
                 _pending_inject = None
             else:
                 user_input = await get_boxed_input(session, model_id, connection_state[0], agent_names, engine)
-                user_input = user_input.strip()
-                if user_input:
-                    # Move up 4 lines (height of the boxed prompt layout) and clear it
-                    sys.stdout.write("\x1b[4A\x1b[J")
-                    sys.stdout.flush()
-                    if not user_input.startswith("/") and not user_input.startswith("!"):
-                        print_user_message(user_input)
+
+            # Paste handling pipeline: determine display text (collapsed) and
+            # engine text (expanded) independently.
+            #   A) BracketedPaste handler fired → user_input has placeholder markers
+            #   B) No handler (non-supporting terminal) → user_input is raw full text
+            user_input = user_input.strip()
+            if user_input:
+                if _paste_store and _PASTE_PATTERN.search(user_input):
+                    # Case A: placeholders already in buffer → display as-is (collapsed)
+                    display_text = user_input
+                    engine_text = _expand_paste_markers(user_input)
+                elif len(user_input.splitlines()) > PASTE_COLLAPSE_THRESHOLD * 2:
+                    # Case B: raw large paste → collapse for display, store for engine
+                    _expanded = _expand_paste_markers(user_input)  # no-op if no markers
+                    display_text = _collapse_paste(_expanded)
+                    engine_text = _expand_paste_markers(display_text)
+                else:
+                    # Normal small input — no transformation
+                    display_text = engine_text = user_input
+
+                # Move up 4 lines (height of the boxed prompt layout) and clear it
+                sys.stdout.write("\x1b[4A\x1b[J")
+                sys.stdout.flush()
+                if not engine_text.startswith("/") and not engine_text.startswith("!"):
+                    print_user_message(display_text)
+                user_input = engine_text  # full content for downstream usage
 
             # Check again after user input to ensure we don't send to a stale session
             active_session = engine.storage.load_session(CHAT_ID)
@@ -928,21 +965,6 @@ async def main():
 
             if not user_input:
                 continue
-
-            # Expand paste placeholders back to full text before sending.
-            # Handles two cases:
-            #   1. user_input IS the placeholder (simple paste + Enter)
-            #   2. user_input CONTAINS placeholder(s) embedded in longer text
-            if _paste_store:
-                if user_input in _paste_store:
-                    # Simple case: the whole input is a placeholder
-                    user_input = _paste_store.pop(user_input)
-                else:
-                    # Complex case: scan for embedded placeholders
-                    for placeholder, content in list(_paste_store.items()):
-                        if placeholder in user_input:
-                            user_input = user_input.replace(placeholder, content)
-                            _paste_store.pop(placeholder, None)
 
             # Command routing
             if user_input.startswith("/"):

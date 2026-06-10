@@ -1085,19 +1085,27 @@ class OpenCodeBotClient:
             logger.error("Test key error: %s", e)
             return False, f"System error during test: {str(e)}"
 
-    async def send_simple_query(self, query: str, timeout: float = 120.0) -> str:
+    async def send_simple_query(self, query: str, timeout: float = 120.0,
+                                  provider_id: Optional[str] = None,
+                                  model_id: Optional[str] = None) -> str:
         """Send a minimal query WITHOUT the full BMO system context.
 
         Used for lightweight tasks like summarization where the full
         system prompt + memory + tools would be wasteful overhead.
         Creates a temp session, sends just the query, polls, returns text.
+
+        Args:
+            query: The text to send.
+            timeout: Max wait time in seconds.
+            provider_id: Provider to use (defaults to env or 'opencode').
+            model_id: Model to use (defaults to env or 'big-pickle').
         """
         if not self.is_connected:
             connected = await self.connect()
             if not connected:
                 raise ConnectionError("Could not connect to OpenCode backend")
 
-        session_id = await self.create_session()
+        session_id = await self.create_session(provider_id=provider_id, model_id=model_id)
         if not session_id:
             raise RuntimeError("Could not create OpenCode session")
 

@@ -1,10 +1,10 @@
-"""BFP Discovery — Cloudflare Workers registry client.
+"""BFP Discovery — relay directory client.
 
 REST client for registering, resolving, and finding agents by capability
-through the BFP Registry (Cloudflare Workers KV).
+through a BFP relay server.
 
-Registry URL: https://bfp-registry.aliwey.workers.dev
-              (override via BFP_REGISTRY_URL env var or bmo_init config)
+Default relay: http://127.0.0.1:9753 (auto-started by BMO)
+Override via BFP_RELAY_URL or BFP_REGISTRY_URL env var.
 """
 
 import logging
@@ -15,50 +15,52 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Default public registry — hosted on Cloudflare Workers (free tier)
-DEFAULT_REGISTRY_URL = "https://bfp-registry.aliwey.workers.dev"
+# Default is the local relay (auto-started by BMO on port 9753).
+# Override via BFP_REGISTRY_URL for a custom registry endpoint.
+DEFAULT_RELAY_URL = "http://127.0.0.1:9753"
 
 
 class BFPDiscovery:
-    """Client for the BFP Registry (Cloudflare Workers KV)."""
+    """Client for the BFP relay directory (REST API)."""
 
     def __init__(self, relay_url: str = None):
-        # relay_url kept for backward compat but we use the registry URL
-        self.relay_url = relay_url  # local relay WebSocket URL (if any)
-        self.registry_url = (
-            os.getenv("BFP_REGISTRY_URL") or DEFAULT_REGISTRY_URL
+        self.base_url = (
+            relay_url or os.getenv("BFP_RELAY_URL") or
+            os.getenv("BFP_REGISTRY_URL") or DEFAULT_RELAY_URL
         ).rstrip("/")
-        self._http = httpx.AsyncClient(timeout=10.0)
+        self._http = httpx.AsyncClient(timeout=5.0)
 
-    # ── Registry (Cloudflare Workers) ─────────────────────────────────────────
+    # ── Directory REST API ─────────────────────────────────────────────────
 
     async def register(
         self,
         did: str,
         endpoint: str,
-        caps: list,
-        public_key: str = None,     # unused by Workers registry, kept for compat
-        name: str = None,           # unused by Workers registry, kept for compat
+        capabilities: list = None,
+        public_key: str = None,
+        name: str = None,
     ) -> dict:
-        resp = await self._http.post(f"{self.registry_url}/register", json={
+        resp = await self._http.post(f"{self.base_url}/register", json={
             "did": did,
             "endpoint": endpoint,
-            "caps": caps,
+            "capabilities": capabilities or [],
+            "publicKey": public_key or "",
+            "name": name or "",
         })
         resp.raise_for_status()
         return resp.json()
 
     async def unregister(self, did: str) -> None:
         try:
-            resp = await self._http.post(f"{self.registry_url}/unregister", json={"did": did})
+            resp = await self._http.delete(f"{self.base_url}/unregister/{did}")
             resp.raise_for_status()
         except Exception as e:
-            logger.warning(f"BFP unregister failed: {e}")
+            logger.warning("BFP unregister failed: %s", e)
 
     async def lookup(self, did: str) -> Optional[dict]:
         """Resolve a DID to its current endpoint and capabilities."""
         try:
-            resp = await self._http.get(f"{self.registry_url}/lookup", params={"did": did})
+            resp = await self._http.get(f"{self.base_url}/resolve/{did}")
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
@@ -68,36 +70,28 @@ class BFPDiscovery:
                 return None
             raise
 
-    # kept for backward compat (old code calls resolve(), new calls lookup())
     async def resolve(self, did: str) -> Optional[dict]:
         return await self.lookup(did)
 
     async def find_agents(self, capability: str = None) -> list[dict]:
         """Find online agents by capability (or list all if no capability given)."""
         params = {"capability": capability} if capability else {}
-        resp = await self._http.get(f"{self.registry_url}/list", params=params)
+        resp = await self._http.get(f"{self.base_url}/list", params=params)
         resp.raise_for_status()
         data = resp.json()
-        # Registry returns a list; old relay returned {"agents": [...]}
         if isinstance(data, list):
             return data
         return data.get("agents", [])
 
-    # kept for backward compat (old code calls find_by_capability)
     async def find_by_capability(self, capability: str) -> list[dict]:
         return await self.find_agents(capability)
 
     async def list_all(self) -> list[dict]:
-        resp = await self._http.get(f"{self.registry_url}/list")
-        resp.raise_for_status()
-        result = resp.json()
-        if isinstance(result, list):
-            return result
-        return result.get("agents", [])
+        return await self.find_agents()
 
     async def health(self) -> dict:
-        """Check registry health."""
-        resp = await self._http.get(f"{self.registry_url}/health")
+        """Check relay health."""
+        resp = await self._http.get(f"{self.base_url}/health")
         resp.raise_for_status()
         return resp.json()
 

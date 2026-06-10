@@ -35,6 +35,8 @@ class BFPRelay:
         self._pending_responses: dict[str, asyncio.Future] = {}
         self._app: FastAPI | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._server: uvicorn.Server | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _validate_did(self, did: str) -> None:
         if not did.startswith("did:bfp:"):
@@ -207,7 +209,10 @@ class BFPRelay:
                             await ws.send_json({"type": "resolve_result", "found": True, **result})
                     elif action == "list":
                         agents = self.list_agents(msg.get("capability"))
-                        await ws.send_json({"type": "list_result", "agents": agents})
+                        resp = {"type": "list_result", "agents": agents}
+                        if "requestId" in msg:
+                            resp["requestId"] = msg["requestId"]
+                        await ws.send_json(resp)
                     elif action == "forward":
                         target_did = msg.get("targetDid")
                         payload = msg.get("payload", {})
@@ -319,23 +324,28 @@ class BFPRelay:
             log_level="info",
             access_log=True,
         )
-        server = uvicorn.Server(config)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        self._server = uvicorn.Server(config)
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
 
-        self._cleanup_task = loop.create_task(self._cleanup_loop())
+        self._cleanup_task = self._loop.create_task(self._cleanup_loop())
 
         try:
             log.info("BFP Relay starting on %s:%s", self.host, self.port)
-            server.run()
+            self._server.run()
         except KeyboardInterrupt:
             pass
         finally:
             self.stop()
 
     def stop(self) -> None:
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
+        if self._server:
+            self._server.should_exit = True
+        if self._cleanup_task and self._loop and self._loop.is_running():
+            try:
+                self._loop.call_soon_threadsafe(self._cleanup_task.cancel)
+            except Exception:
+                pass
         self._persist()
         log.info("BFP Relay stopped")
 
@@ -353,6 +363,24 @@ def main():
 
     relay = BFPRelay(host=args.host, port=args.port, persist_path=args.persist)
     relay.start()
+
+
+def start_detached(host: str = "127.0.0.1", port: int = DEFAULT_PORT,
+                   persist_path: str = None) -> BFPRelay:
+    """Start a BFP Relay in a background thread.
+
+    Returns the BFPRelay instance. Call relay.stop() to terminate.
+    This is the import-friendly entry point used by BMO for auto-start.
+    """
+    import threading
+    relay = BFPRelay(host=host, port=port, persist_path=persist_path)
+
+    def _run():
+        relay.start()
+
+    t = threading.Thread(target=_run, name="bfp-relay", daemon=True)
+    t.start()
+    return relay
 
 
 if __name__ == "__main__":

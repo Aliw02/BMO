@@ -88,6 +88,12 @@ class BFPConnector:
                     future = self._pending.get(request_id)
                     if future and not future.done():
                         future.set_result(msg)
+                elif msg_type in ("list_result", "register_result", "resolve_result"):
+                    request_id = msg.get("requestId", "")
+                    if request_id:
+                        future = self._pending.get(request_id)
+                        if future and not future.done():
+                            future.set_result(msg)
                 elif msg_type == "agent_list":
                     pass
         except websockets.exceptions.ConnectionClosed:
@@ -155,13 +161,21 @@ class BFPConnector:
         })
 
     async def find_agents(self, capability: str = None) -> list[dict]:
-        discovery = BFPDiscovery(self.relay_url)
+        if not self._ws or self._ws.closed:
+            raise RuntimeError("Not connected to relay")
+        request_id = f"bfp-list-{uuid.uuid4().hex[:12]}"
+        future = asyncio.get_event_loop().create_future()
+        self._pending[request_id] = future
         try:
-            if capability:
-                return await discovery.find_by_capability(capability)
-            return await discovery.list_all()
+            await self._ws.send(json.dumps({
+                "action": "list",
+                "capability": capability,
+                "requestId": request_id,
+            }))
+            result = await asyncio.wait_for(future, timeout=10.0)
+            return result.get("agents", [])
         finally:
-            await discovery.close()
+            self._pending.pop(request_id, None)
 
     async def talk(self, target_did: str, message: str) -> str:
         result = await self.delegate(target_did, {"query": message, "action": "talk"})

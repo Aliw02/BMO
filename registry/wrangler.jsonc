@@ -1,11 +1,11 @@
 {
   "name": "bfp-registry",
   "main": "worker.js",
-  "compatibility_date": "2025-01-01",
+  "compatibility_date": "2025-06-08",
   "kv_namespaces": [
     {
       "binding": "REGISTRY",
-      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+      "id": "389774fc03fc4d1dab3edf4fb21d86e7"
     }
   ]
 }

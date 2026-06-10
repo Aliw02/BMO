@@ -312,9 +312,14 @@ class BMOEngine:
             f"Keep it under 300 words.\n\n{history_text}"
         )
 
+        # Use the session's active model for summarization, not the default big-pickle
+        provider_id = session.metadata.get("provider_id")
+        model_id = session.metadata.get("model_id")
+
         try:
             summary = await asyncio.wait_for(
-                self.client.send_simple_query(summary_prompt, timeout=120.0),
+                self.client.send_simple_query(summary_prompt, timeout=120.0,
+                                              provider_id=provider_id, model_id=model_id),
                 timeout=120.0
             )
         except Exception as e:
@@ -374,9 +379,14 @@ class BMOEngine:
             f"السياق:\n{history}"
         )
 
+        # Use the session's active model for summarization
+        p_id = session.metadata.get("provider_id")
+        m_id = session.metadata.get("model_id")
+
         try:
             summary = await asyncio.wait_for(
-                self.client.send_query(prompt, active_mode="ask", chat_id=session.chat_id),
+                self.client.send_query(prompt, active_mode="ask", chat_id=session.chat_id,
+                                       provider_id=p_id, model_id=m_id),
                 timeout=30.0
             )
             if summary and not summary.startswith("Error"):
