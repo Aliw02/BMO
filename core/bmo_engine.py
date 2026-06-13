@@ -49,6 +49,21 @@ class BMOEngine:
         self.user_cwd = user_cwd
         self._features_dir = BMO_HOME / "data" / "features"
         self._features_dir.mkdir(parents=True, exist_ok=True)
+        self._setup_bfp_handler()
+
+    def _setup_bfp_handler(self):
+        """Register the BFP task handler so incoming delegated tasks are processed through OpenCode."""
+        async def _bfp_task_handler(source_did: str, task_data: dict) -> str:
+            query = task_data.get("query", str(task_data))
+            action = task_data.get("action", "delegate")
+            logger.info("BFP task from %s (action=%s): %s", source_did, action, query[:200])
+            try:
+                result = await self.client.send_simple_query(query, timeout=300.0)
+                return result
+            except Exception as e:
+                logger.error("BFP task processing failed: %s", e)
+                return f"Error processing task: {e}"
+        self.bfp.set_task_handler(_bfp_task_handler)
 
     async def ensure_worker(self):
         # Don't start the worker if the client has it disabled (e.g. CLI uses
@@ -64,11 +79,18 @@ class BMOEngine:
             await self.worker_manager.start()
             self._worker_started = True
         if not self._bfp_started:
-            asyncio.create_task(self.bfp.start(
-                bfp_port=BFP_TRANSPORT_PORT,
-                a2a_port=BFP_A2A_PORT,
-                relay_url=BFP_RELAY_URL,
-            ))
+            _connect_did = os.environ.get("BFP_CONNECT_DID", "").strip()
+            if _connect_did:
+                asyncio.create_task(self.bfp.start(
+                    bfp_port=BFP_TRANSPORT_PORT,
+                    a2a_port=BFP_A2A_PORT,
+                ))
+            else:
+                asyncio.create_task(self.bfp.start(
+                    bfp_port=BFP_TRANSPORT_PORT,
+                    a2a_port=BFP_A2A_PORT,
+                    relay_url=BFP_RELAY_URL,
+                ))
             self._bfp_started = True
 
     async def get_or_create_session(self, chat_id: int, user_id: int, username: Optional[str] = None) -> ChatSession:

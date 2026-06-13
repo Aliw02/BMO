@@ -6,7 +6,7 @@ Auto-starts a local relay on boot so /bfp commands work out of the box.
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 
 from config.settings import DATA_DIR, BFP_RELAY_URL as _cfg_relay_url
 from core.bfp_identity import get_did, sign, verify
@@ -15,6 +15,7 @@ from core.bfp_transport import BFPServer, BFPClient
 from core.bfp_a2a_bridge import get_a2a_agent_card, start_a2a_endpoint
 from core.bfp_connector import BFPConnector
 from core.bfp_discovery import BFPDiscovery
+from core.bfp_tasks import set_handler as _set_task_handler, list_tasks, get_task
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class BFPAgent:
 
     Auto-starts a local relay (directory + WebSocket relay) on boot.
     If BFP_RELAY_URL is set in .env, connects to that external relay instead.
+    If BFP_CONNECT_DID is set, resolves the DID from the registry to get the relay URL.
     """
 
     def __init__(self):
@@ -56,13 +58,28 @@ class BFPAgent:
             logger.warning("A2A endpoint start failed (non-fatal): %s", e)
             self.a2a_server = None
 
-        # ── Relay: auto-start local OR connect to external ──────────────────
+        # ── Relay: resolve DID via registry, or connect to external URL, or auto-start local ──
         effective_relay = relay_url or _cfg_relay_url
+        connect_did = os.getenv("BFP_CONNECT_DID", "").strip()
+        if connect_did:
+            # Resolve DID from registry to get current relay URL (no hardcoded tunnel URL needed)
+            registry_url = os.getenv("BFP_REGISTRY_URL", "https://bfp-registry.bmo-relay.workers.dev")
+            disc = BFPDiscovery(relay_url=registry_url)
+            try:
+                info = await disc.resolve(connect_did)
+                if info and info.get("endpoint"):
+                    self.relay_url = info["endpoint"].rstrip("/")
+                    logger.info("BFP resolved DID %s → relay %s", connect_did, self.relay_url)
+                else:
+                    logger.warning("BFP could not resolve DID %s, falling back to local relay", connect_did)
+            except Exception as e:
+                logger.warning("BFP resolve failed (%s), falling back to local relay", e)
+            await disc.close()
         if effective_relay:
             # External relay — connect to it
             self.relay_url = effective_relay.rstrip("/")
             logger.info("BFP connecting to external relay: %s", self.relay_url)
-        else:
+        if not self.relay_url:
             # Auto-start a local relay
             self.relay_url = f"http://127.0.0.1:{DEFAULT_RELAY_PORT}"
             try:
@@ -106,6 +123,21 @@ class BFPAgent:
                 pass
         self._running = False
         logger.info("BFP Agent stopped")
+
+    def set_task_handler(self, handler):
+        """Register an async handler for incoming delegated tasks.
+
+        The handler receives (source_did, task_data) and should return
+        the result string. This is called by the engine to route tasks
+        through OpenCode for real processing.
+        """
+        _set_task_handler(handler)
+
+    def list_tasks(self) -> list[dict]:
+        return list_tasks()
+
+    def get_task(self, task_id: str) -> Optional[dict]:
+        return get_task(task_id)
 
     async def _on_relay_message(self, from_did: str, task_id: str, result: str):
         logger.info("BFP relay message from %s — task %s: %s", from_did, task_id, result[:100])

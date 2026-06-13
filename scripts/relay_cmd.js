@@ -21,7 +21,7 @@ const BMO_BIN    = path.join(BMO_HOME, 'bin');
 const PKG_DIR    = path.join(__dirname, '..');
 const TASKS_FILE = path.join(BMO_HOME, 'data', 'background_tasks.json');
 const RELAY_PORT = parseInt(process.env.BFP_RELAY_PORT || '9753');
-const REGISTRY_URL = process.env.BFP_REGISTRY_URL || 'https://bfp-registry.aliwey.workers.dev';
+const REGISTRY_URL = process.env.BFP_REGISTRY_URL || 'https://bfp-registry.bmo-relay.workers.dev';
 
 const isPrivate  = process.argv.includes('--private');
 const isStop     = process.argv.includes('--stop');
@@ -194,7 +194,7 @@ async function stopRelay() {
   // ── Start cloudflared tunnel ────────────────────────────────────────────────
   console.log('⏳ Starting cloudflared tunnel...');
   const cfExe = getCloudflaredExe();
-  const cf = spawn(cfExe, ['tunnel', '--url', `ws://localhost:${RELAY_PORT}`], {
+  const cf = spawn(cfExe, ['tunnel', '--url', `http://127.0.0.1:${RELAY_PORT}`, '--no-autoupdate'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   });

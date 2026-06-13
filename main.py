@@ -13,7 +13,7 @@ if _PARENT_ROOT not in sys.path:
     sys.path.insert(0, _PARENT_ROOT)
 
 try:
-    from config.settings import TELEGRAM_TOKEN, LOG_FORMAT, LOG_LEVEL
+    from config.settings import TELEGRAM_TOKEN, LOG_FORMAT, LOG_LEVEL, OWNER_ID
 except ImportError as exc:
     print(f"FATAL: Cannot import config.settings — {exc}", file=sys.stderr)
     print(f"  sys.path = {sys.path}", file=sys.stderr)
@@ -44,6 +44,10 @@ from handlers.messages import (
     settings_callback,
     agent_callback,
     inline_action_callback,
+    handle_system_reload,
+    handle_plugins,
+    handle_publish,
+    question_callback,
 )
 
 logging.basicConfig(format=LOG_FORMAT, level=getattr(logging, LOG_LEVEL, logging.INFO))
@@ -88,6 +92,9 @@ def main():
     # ── Commands ──────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", menu_command))
+    app.add_handler(CommandHandler("reload", handle_system_reload))
+    app.add_handler(CommandHandler("plugins", handle_plugins))
+    app.add_handler(CommandHandler("publish", handle_publish, filters=filters.User(user_id=OWNER_ID)))
 
     # ── Inline keyboard callbacks ─────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(choose_model_callback, pattern=r"^(m|mp):"))
@@ -97,7 +104,8 @@ def main():
     app.add_handler(CallbackQueryHandler(session_select_callback, pattern=r"^session:"))
     app.add_handler(CallbackQueryHandler(settings_callback,       pattern=r"^(set_keys|admin_stats|back_settings|setup_p_.*|ttl_.*|perm_.*)$"))
     app.add_handler(CallbackQueryHandler(agent_callback,          pattern=r"^agent_"))
-    app.add_handler(CallbackQueryHandler(inline_action_callback,   pattern=r"^(action:|back_to_menu|history_page:|session_load:)"))
+    app.add_handler(CallbackQueryHandler(inline_action_callback,   pattern=r"^(action:|back_to_menu|history_page:|session_load:|plugin_toggle:)"))
+    app.add_handler(CallbackQueryHandler(question_callback,       pattern=r"^qstn\|"))
 
     # ── Plain text messages & Documents & Photos ───────────────────────────────────────
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))

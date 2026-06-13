@@ -38,7 +38,7 @@ from config.settings import CHUNK_SIZE, ALLOWED_USER_IDS, OWNER_ID, OPENCODE_BAS
 from core.bot_client import OpenCodeBotClient
 from models.chat_models import ChatSession
 from storage.storage import get_storage
-from core.shared_state import pending_permissions
+from core.shared_state import pending_permissions, pending_questions
 from core.bmo_engine import BMOEngine
 from core.profiler_engine import ProfilerEngine
 
@@ -98,6 +98,7 @@ BTN_CHOOSE_MODEL = "🤖 Model"
 # Row 4: Tools & System
 BTN_AGENTS       = "🎭 Agents"
 BTN_SKILLS      = "🛠️ Skills"
+BTN_PLUGINS     = "🔌 Plugins"
 BTN_RELOAD       = "🔄 Reload"
 
 # Row 5: System (minimal)
@@ -116,7 +117,7 @@ BTN_CLEAR_HIST  = "🗑️ Reset History"
 BTNS_ROW1 = [BTN_NEW_SESSION, BTN_SAVE, BTN_SUMMARY]
 BTNS_ROW2 = [BTN_SESSIONS, BTN_SET_TITLE, BTN_RESET_HISTORY]
 BTNS_ROW3 = [BTN_HISTORY, BTN_LOAD, BTN_CHOOSE_MODEL]
-BTNS_ROW4 = [BTN_AGENTS, BTN_SKILLS, BTN_RELOAD]
+BTNS_ROW4 = [BTN_AGENTS, BTN_SKILLS, BTN_PLUGINS, BTN_RELOAD]
 BTNS_ROW5 = [BTN_STATUS, BTN_MODE, BTN_MENU]
 BTNS_ROW6 = [BTN_SETTINGS]
 
@@ -168,7 +169,13 @@ def build_inline_menu(session: ChatSession = None) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🛠️ Skills", callback_data="action:use_skill"),
     ])
     
-    # Row 6: Web chat (dynamic — shows launch or stop based on port status)
+    # Row 6: Plugins
+    kb.append([
+        InlineKeyboardButton("🔌 Plugins", callback_data="action:plugins"),
+        InlineKeyboardButton("🔄 Reload", callback_data="action:reload"),
+    ])
+    
+    # Row 7: Web chat (dynamic — shows launch or stop based on port status)
     from tools.task_registry import check_port_conflict
     conflict = check_port_conflict(3456)
     webchat_btn = (
@@ -236,6 +243,35 @@ def build_session_history_kb(sessions: list, page: int = 0, per_page: int = 8) -
     kb.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")])
     
     return InlineKeyboardMarkup(kb)
+
+
+# ── Plugin Manager Inline Keyboard ─────────────────────────────────────────
+def build_plugin_keyboard() -> InlineKeyboardMarkup:
+    """Build inline keyboard for plugin manager with toggle buttons."""
+    from tools.plugin_loader import plugin_loader
+
+    if not plugin_loader.list():
+        plugin_loader.discover()
+    plugins = plugin_loader.list()
+
+    kb = []
+    if not plugins:
+        kb.append([InlineKeyboardButton("[No plugins found]", callback_data="back_to_menu")])
+    else:
+        for p in sorted(plugins, key=lambda x: x.name):
+            status = "[ON]" if p.enabled else "[OFF]"
+            label = f"{status} {p.name}"
+            kb.append([
+                InlineKeyboardButton(label, callback_data=f"plugin_toggle:{p.name}"),
+            ])
+
+    kb.append([
+        InlineKeyboardButton("[Reload]", callback_data="action:reload"),
+        InlineKeyboardButton("[Back]", callback_data="back_to_menu"),
+    ])
+
+    return InlineKeyboardMarkup(kb)
+
 
 MODES = {
     "plan": ("📝 Plan Mode", "BMO will only outline steps and design solutions without executing code."),
@@ -324,6 +360,10 @@ async def inline_action_callback(update: Update, context: ContextTypes.DEFAULT_T
         await handle_agents(update, context)
     elif data == "action:use_skill":
         await handle_use_skill(update, context)
+    elif data == "action:plugins":
+        await _handle_plugin_list_inline(query)
+    elif data == "action:reload":
+        await handle_system_reload(update, context)
     elif data == "action:status":
         await _handle_status_inline(query, session)
     elif data == "action:settings":
@@ -346,6 +386,9 @@ async def inline_action_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("session_load:"):
         sid = data.split(":")[1]
         await _handle_load_session(query, sid)
+    elif data.startswith("plugin_toggle:"):
+        name = data.split(":", 1)[1]
+        await _handle_plugin_toggle(query, name)
 
 
 async def handle_list_sessions_inline(query, session, page: int = 0):
@@ -2057,6 +2100,132 @@ async def _check_profiler(session: ChatSession, bot, chat_id: int):
             logger.info("Profiler: recorded %d observation(s) for chat %s", total, chat_id)
 
 
+# ── Interactive Question Handler ──────────────────────────────────────────────
+
+def _build_question_callback(bot, chat_id):
+    """Build an on_question callback that presents options as Telegram inline buttons."""
+    async def on_question(call_id: str, question_state: dict) -> list:
+        questions = question_state.get("questions", [])
+        if not questions:
+            single_q = question_state.get("question")
+            single_opts = question_state.get("options", [])
+            is_multi = question_state.get("is_multi_select", False)
+            if single_q:
+                questions = [{"question": single_q, "options": single_opts, "is_multi_select": is_multi}]
+
+        if not questions:
+            return []
+
+        q_item = questions[0]
+        q_text = q_item.get("question", "Question")
+        options = q_item.get("options", [])
+        is_multi = q_item.get("is_multi_select", False)
+
+        if not options:
+            return []
+
+        kb = []
+        for i, opt in enumerate(options):
+            kb.append([InlineKeyboardButton(opt, callback_data=f"qstn|{chat_id}|{call_id}|{i}")])
+        kb.append([InlineKeyboardButton("Cancel", callback_data=f"qstn|{chat_id}|{call_id}|cancel")])
+
+        multi_note = "\n<i>Select one option:</i>" if not is_multi else "\n<i>Tap options to toggle, then tap Done:</i>"
+        msg = await bot.send_message(
+            chat_id=chat_id,
+            text="<b>BMO needs your input</b>\n\n" + q_text + multi_note,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+        key = (chat_id, call_id)
+        event = asyncio.Event()
+        pending_questions[key] = {
+            "event": event,
+            "result": [],
+            "message_ids": [msg.message_id],
+            "options": options,
+            "is_multi": is_multi,
+        }
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=300.0)
+        except asyncio.TimeoutError:
+            pass
+
+        entry = pending_questions.pop(key, {})
+        result = entry.get("result", [])
+        try:
+            await msg.edit_text(
+                f"Response received ({len(result)} option{'s' if len(result) != 1 else ''})",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+        return result
+    return on_question
+
+
+async def question_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline button responses for interactive questions."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    chat_id = query.message.chat_id
+
+    parts = data.split("|", 3)
+    if len(parts) < 4:
+        return
+
+    _, expected_chat_id, call_id, option_value = parts
+    expected_chat_id = int(expected_chat_id)
+    if expected_chat_id != chat_id:
+        await query.answer("This question is not for you!", show_alert=True)
+        return
+
+    key = (chat_id, call_id)
+    if key not in pending_questions:
+        await query.answer("This question has expired.", show_alert=True)
+        return
+
+    entry = pending_questions[key]
+    options = entry["options"]
+    is_multi = entry["is_multi"]
+
+    if option_value == "cancel":
+        entry["result"] = []
+        entry["event"].set()
+        await query.edit_message_text("Cancelled.")
+        return
+
+    option_idx = int(option_value)
+
+    if is_multi:
+        if option_idx in entry["result"]:
+            entry["result"].remove(option_idx)
+        else:
+            entry["result"].append(option_idx)
+
+        kb = []
+        for i, opt in enumerate(options):
+            selected = " " if i in entry["result"] else ""
+            kb.append([InlineKeyboardButton(f"{selected}{opt}", callback_data=f"qstn|{chat_id}|{call_id}|{i}")])
+        kb.append([InlineKeyboardButton("Done", callback_data=f"qstn|{chat_id}|{call_id}|done")])
+        kb.append([InlineKeyboardButton("Cancel", callback_data=f"qstn|{chat_id}|{call_id}|cancel")])
+
+        selected_texts = [options[i] for i in entry["result"]]
+        status = f"\n\n<i>Selected: {', '.join(selected_texts) if selected_texts else 'none'}</i>"
+        base = query.message.text.split("\n\n<i>Selected:")[0]
+        await query.edit_message_text(
+            base + status,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    else:
+        entry["result"] = [options[option_idx]]
+        entry["event"].set()
+        await query.edit_message_text(f"Selected: {options[option_idx]}", parse_mode=ParseMode.HTML)
+
+
 # ── CORE HANDLERS ─────────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2086,6 +2255,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     elif text == BTN_SKILLS:
         await handle_use_skill(update, context)
+        return
+    elif text == BTN_PLUGINS:
+        await handle_plugins(update, context)
         return
     elif text == "⚡ Choose Mode":
         await handle_choose_mode(update, context)
@@ -2199,6 +2371,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     elif text == BTN_USE_SKILL:  # Legacy alias
         await handle_use_skill(update, context)
+        return
+    elif text == BTN_PLUGINS:
+        await handle_plugins(update, context)
         return
     elif text == BTN_MODE:
         await handle_choose_mode(update, context)
@@ -2503,7 +2678,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 active_mode=active_mode,
                 active_agent=active_agent,
                 chat_id=chat_id,
-                session_uuid=session.session_id
+                session_uuid=session.session_id,
+                on_question=_build_question_callback(context.bot, chat_id)
             )
             # Update session ID if it was new
             if opencode_client.last_session_id:
@@ -2527,6 +2703,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.error("Processing error: %s", e)
             await waiting_msg.edit_text(f"❌ Error: {str(e)}")
 
+    # Cancel any existing task for this chat to prevent duplicate polling
+    old = _running_tasks.get(chat_id)
+    if old and not old.done():
+        old.cancel()
     task = asyncio.create_task(_process())
     _running_tasks[chat_id] = task
 
@@ -2673,7 +2853,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 model_id=model_id,
                 active_mode=active_mode,
                 provider_env=provider_env,
-                chat_id=chat_id
+                chat_id=chat_id,
+                on_question=_build_question_callback(context.bot, chat_id)
             )
             if opencode_client.last_session_id:
                 session.metadata["opencode_session_id"] = opencode_client.last_session_id
@@ -2693,30 +2874,185 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await poller_task
             await waiting_msg.edit_text(f"❌ Error: {str(e)}")
 
+    old = _running_tasks.get(chat_id)
+    if old and not old.done():
+        old.cancel()
     task = asyncio.create_task(_process_file())
     _running_tasks[chat_id] = task
 
 
 async def handle_system_reload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Gracefully exits the process. start_BMO.bat will restart it."""
-    # Send confirmation message
-    await update.message.reply_text("☢️ <b>System Reload Initiated...</b>\nBot will be back online in 5 seconds.", parse_mode=ParseMode.HTML)
-    logger.info("System reload requested by user %s", update.effective_user.id)
-    
-    # Send notification to user
+    """Reload plugins without restarting the bot."""
+    from tools.plugin_loader import plugin_loader
+
     try:
-        from telegram import Bot
-        bot = Bot(token=os.getenv("TELEGRAM_TOKEN", ""))
-        await bot.send_message(
-            chat_id=OWNER_ID,
-            text="🔄 <b>BMO is restarting with new buttons!</b>\n\nCheck your keyboard - new cleaner layout is ready!",
-            parse_mode=ParseMode.HTML
+        result = plugin_loader.reload()
+        lines = ["<b>Plugin Reload Complete</b>"]
+        sections = []
+        if result["loaded"]:
+            sections.append(f"  New     : {', '.join(result['loaded'])}")
+        if result["reloaded"]:
+            sections.append(f"  Updated : {', '.join(result['reloaded'])}")
+        if result["removed"]:
+            sections.append(f"  Removed : {', '.join(result['removed'])}")
+        if result["errors"]:
+            sections.append(f"  Errors  : {', '.join(result['errors'])}")
+        if sections:
+            lines.extend(sections)
+        else:
+            lines.append("  No changes detected.")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error("Plugin reload error: %s", e)
+        await update.message.reply_text(f"Reload failed: {e}")
+
+
+async def handle_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Publish BMO npm package (owner only)."""
+    owner_id = int(os.getenv("OWNER_ID", "0"))
+    if update.effective_user.id != owner_id:
+        await update.message.reply_text("⛔ Owner only command.")
+        return
+    msg = await update.message.reply_text("📦 Publishing @aliwey/bmo...")
+
+    bump_part = "patch"
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ("major", "minor", "patch"):
+            bump_part = arg
+
+    from tools.publish import do_publish
+    result = await do_publish(bump_part)
+
+    if result["success"]:
+        text = (
+            f"{result['message']}\n\n"
+            f"<pre>{result['details']}</pre>\n\n"
+            "Run /reload to activate the new version locally."
+        )
+    else:
+        text = f"{result['message']}\n<pre>{result['details']}</pre>"
+
+    await msg.edit_text(text, parse_mode=ParseMode.HTML)
+
+
+async def _handle_plugin_toggle(query, name: str) -> None:
+    """Toggle a plugin's enabled/disabled state and redraw the keyboard."""
+    from tools.plugin_loader import plugin_loader
+
+    plugin = plugin_loader.get(name)
+    if not plugin:
+        await query.edit_message_text(
+            f"❌ Plugin <b>{name}</b> not found. Run /reload to refresh.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if plugin.enabled:
+        plugin_loader.disable(name)
+        status = "[OFF]"
+    else:
+        plugin_loader.enable(name)
+        status = "[ON]"
+
+    await query.answer(f"{name} {status}")
+
+    plugin_count = len(plugin_loader.list())
+    text = f"<b>Plugin Manager</b> — {name} {status}\n\nTap a plugin to toggle it:"
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_plugin_keyboard(),
+    )
+
+
+async def _handle_plugin_list_inline(query) -> None:
+    """Show plugin list as inline message with toggle buttons."""
+    from tools.plugin_loader import plugin_loader
+
+    if not plugin_loader.list():
+        plugin_loader.discover()
+    plugins = plugin_loader.list()
+
+    if not plugins:
+        await query.edit_message_text(
+            "<b>No plugins loaded.</b>\n\n"
+            "Add .py files to <code>tools/plugins/</code> and tap Reload.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("[Reload]", callback_data="action:reload")],
+                [InlineKeyboardButton("[Back]", callback_data="back_to_menu")],
+            ]),
+        )
+        return
+
+    text = f"<b>Plugin Manager</b> ({len(plugins)})\n\nTap a plugin to toggle it:"
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_plugin_keyboard(),
+    )
+
+
+async def handle_plugins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List, enable, or disable plugins.
+    
+    Usage:
+      /plugins              — show inline plugin manager
+      /plugins enable NAME  — enable a plugin
+      /plugins disable NAME — disable a plugin
+    """
+    from tools.plugin_loader import plugin_loader
+
+    text = update.message.text.strip()
+    parts = text.split(maxsplit=2)
+    cmd = parts[0].lower()
+
+    # Check for sub-command: /plugins enable <name> or /plugins disable <name>
+    if len(parts) >= 3:
+        sub, name = parts[1].lower(), parts[2]
+        if sub == "enable":
+            if plugin_loader.enable(name):
+                await update.message.reply_text(
+                    f"[ON] <b>{name}</b> enabled.", parse_mode=ParseMode.HTML
+                )
+            else:
+                await update.message.reply_text(
+                    f"[X] Plugin <b>{name}</b> not found.", parse_mode=ParseMode.HTML
+                )
+            return
+        elif sub == "disable":
+            if plugin_loader.disable(name):
+                await update.message.reply_text(
+                    f"[OFF] <b>{name}</b> disabled.", parse_mode=ParseMode.HTML
+                )
+            else:
+                await update.message.reply_text(
+                    f"[X] Plugin <b>{name}</b> not found.", parse_mode=ParseMode.HTML
+                )
+            return
+
+    # No sub-command — show inline plugin manager
+    try:
+        if not plugin_loader.list():
+            plugin_loader.discover()
+        plugins = plugin_loader.list()
+        if not plugins:
+            await update.message.reply_text(
+                "<b>No plugins loaded.</b>\n\n"
+                "Add .py files to <code>tools/plugins/</code> and tap Reload.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        text = f"<b>Plugin Manager</b> ({len(plugins)})\n\nTap a plugin to toggle it:"
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_plugin_keyboard(),
         )
     except Exception as e:
-        logger.error(f"Could not send notification: {e}")
-    
-    await asyncio.sleep(2)
-    os._exit(0)
+        logger.error("Plugin list error: %s", e)
+        await update.message.reply_text(f"[X] Error: {e}", parse_mode=ParseMode.HTML)
 
 
 async def handle_session_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

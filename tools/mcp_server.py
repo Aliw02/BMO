@@ -15,6 +15,7 @@ from tools.task_registry import (
     get_active_tasks, check_port_conflict, format_task_list,
     PROJECT_ROOT as REGISTRY_PROJECT_ROOT,
 )
+from tools.plugin_loader import plugin_loader
 
 load_dotenv()
 
@@ -561,4 +562,71 @@ async def deploy_local_to_web(directory_path: str, port: int = 8080) -> str:
         )
     except Exception as e:
         logger.error(f"Error in deploy_local_to_web: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def list_plugins() -> str:
+    """
+    Lists all loaded plugins with descriptions and parameter schemas.
+    Use this to discover what plugins are available.
+    """
+    try:
+        if not plugin_loader.list():
+            plugin_loader.discover()
+        return plugin_loader.format_list()
+    except Exception as e:
+        logger.error(f"Error in list_plugins: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def run_plugin(name: str, parameters: str = "{}") -> str:
+    """
+    Executes a named plugin with the given parameters.
+
+    Args:
+        name: Plugin name (use list_plugins() to see available)
+        parameters: JSON string of keyword arguments for the plugin
+    """
+    try:
+        if not plugin_loader.list():
+            plugin_loader.discover()
+
+        import json
+        kwargs = json.loads(parameters)
+        result = await plugin_loader.execute(name, **kwargs)
+        return str(result)
+    except ValueError as e:
+        return f"❌ Plugin not found: {e}"
+    except json.JSONDecodeError as e:
+        return f"❌ Invalid JSON parameters: {e}"
+    except Exception as e:
+        logger.error(f"Error in run_plugin: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+async def reload_plugins() -> str:
+    """
+    Reloads all plugins from the tools/plugins/ directory.
+    New plugins are loaded, changed plugins are refreshed, removed plugins are cleaned up.
+    Use this after adding, editing, or removing plugin files.
+    """
+    try:
+        result = plugin_loader.reload()
+        lines = ["🔄 Plugin reload complete:"]
+        if result["loaded"]:
+            lines.append(f"  📥 Loaded: {', '.join(result['loaded'])}")
+        if result["reloaded"]:
+            lines.append(f"  🔄 Reloaded: {', '.join(result['reloaded'])}")
+        if result["removed"]:
+            lines.append(f"  🗑️ Removed: {', '.join(result['removed'])}")
+        if result["errors"]:
+            lines.append(f"  ❌ Errors: {', '.join(result['errors'])}")
+        if not any(result.values()):
+            lines.append("  ℹ️ No changes detected.")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Error in reload_plugins: {e}")
         return f"Error: {str(e)}"

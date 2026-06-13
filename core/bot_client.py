@@ -297,42 +297,6 @@ class OpenCodeBotClient:
         self._memory_cache_time = now
         return self._memory_cache
 
-    async def _get_bmo_identity(self) -> str:
-        """Read BMO.md with caching."""
-        now = time.monotonic()
-        if hasattr(self, '_bmo_cache') and self._bmo_cache is not None and (now - self._bmo_cache_time) < self._CACHE_TTL:
-            return self._bmo_cache
-        try:
-            bmo_path = str(BMO_FILE)
-            if os.path.exists(bmo_path):
-                with open(bmo_path, "r", encoding="utf-8") as f:
-                    self._bmo_cache = f.read()
-            else:
-                self._bmo_cache = ""
-        except Exception as e:
-            logger.warning("Could not read BMO.md: %s", e)
-            self._bmo_cache = ""
-        self._bmo_cache_time = now
-        return self._bmo_cache
-
-    async def _get_user_profile(self) -> str:
-        """Read USER.md with caching."""
-        now = time.monotonic()
-        if hasattr(self, '_user_cache') and self._user_cache is not None and (now - self._user_cache_time) < self._CACHE_TTL:
-            return self._user_cache
-        try:
-            user_path = str(USER_FILE)
-            if os.path.exists(user_path):
-                with open(user_path, "r", encoding="utf-8") as f:
-                    self._user_cache = f.read()
-            else:
-                self._user_cache = ""
-        except Exception as e:
-            logger.warning("Could not read USER.md: %s", e)
-            self._user_cache = ""
-        self._user_cache_time = now
-        return self._user_cache
-
     async def _get_agents_cached(self) -> list:
         """Fetch agents/skills list with caching to avoid HTTP call on every message."""
         now = time.monotonic()
@@ -438,8 +402,6 @@ class OpenCodeBotClient:
         
         self.last_session_id = session_id
 
-        memory_content = await self._get_memory_content()
-
         # Mode-specific instructions
         mode_prompts = _system_config["mode_prompts"]
         mode_instruction = mode_prompts.get(active_mode, mode_prompts["execute"])
@@ -451,21 +413,6 @@ class OpenCodeBotClient:
         agent_prompts = _system_config["agent_prompts"]
         agent_instruction = agent_prompts.get(active_agent, "")
         
-        # Inject available skills/agents
-        skills_block = ""
-        try:
-            agents = await self._get_agents_cached()
-            if agents:
-                lines = ["\n\n<AVAILABLE SKILLS>"]
-                for a in agents[:10]:
-                    name = a.get("name", "")
-                    desc = a.get("description", "")
-                    lines.append(f"- {name}: {desc}")
-                lines.append("</AVAILABLE SKILLS>\nUse these proactively when needed.")
-                skills_block = "\n".join(lines)
-        except Exception:
-            pass
-
         # Build final system context with Memory and Tools
         chat_context = ""
         if chat_id:
@@ -508,19 +455,18 @@ class OpenCodeBotClient:
         # Inject available MCP tools dynamically
         tool_context = await self._build_tool_context()
         
-        memory_content = await self._get_memory_content()
-        memory_block = f"\n\n[LONG-TERM MEMORY]\n{memory_content}\n[END MEMORY]" if memory_content else ""
+        # Knowledge map: compact pointers instead of inlined content
         memory_instruction = _system_config["memory_instruction"]
+        knowledge_map = (
+            "\n\n[KNOWLEDGE FILES \u2014 read on demand via tool]\n"
+            f"- memory.md ({self._memory_path}): Core profile, user info, experience index\n"
+            f"- {BMO_FILE}: BMO identity and behavioral rules\n"
+            f"- {USER_FILE}: Dynamic user profile (auto-updated)\n"
+            "- data/experience/*.md: Detailed technical memories\n"
+            "[END KNOWLEDGE FILES]"
+        )
 
-        bmo_content = await self._get_bmo_identity()
-        bmo_block = f"\n\n[BMO IDENTITY]\n{bmo_content}\n[END BMO IDENTITY]" if bmo_content else ""
-        identity_instruction = _system_config.get("identity_instruction", "")
-
-        user_content = await self._get_user_profile()
-        user_block = f"\n\n[USER PROFILE]\n{user_content}\n[END USER PROFILE]" if user_content else ""
-        profile_instruction = _system_config.get("profile_instruction", "")
-
-        full_system_context = system_base + memory_instruction + identity_instruction + bmo_block + profile_instruction + user_block + tool_instruction + chat_context + skills_block + memory_block + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + _system_config["anti_loop"] + agent_instruction
+        full_system_context = system_base + memory_instruction + tool_instruction + chat_context + skills_block + knowledge_map + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + anti_loop + agent_instruction
 
         async def _do_send(sid):
             try:
@@ -766,9 +712,12 @@ class OpenCodeBotClient:
                     if text and on_token:
                         on_token(text)
 
-                    # Return if we have text and response is complete
-                    if text and is_complete:
-                        logger.info("Response received (%d chars, finish=%s)", len(text), finish_reason or "step-finish")
+                    # Return if complete (even if empty text — tool-only responses)
+                    if is_complete:
+                        if text:
+                            logger.info("Response received (%d chars, finish=%s)", len(text), finish_reason or "step-finish")
+                        else:
+                            logger.info("Response received (tool-only response, no text content)")
                         return text
                     elif text:
                         logger.debug("Response partial (%d chars, waiting for completion)", len(text))
@@ -790,8 +739,11 @@ class OpenCodeBotClient:
             return "Error: Request timed out after 30 minutes."
         finally:
             stop_event.set()
+            bg_task.cancel()
             try:
-                await bg_task
+                await asyncio.wait_for(bg_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
             except Exception:
                 pass
             await poll_client.aclose()
@@ -823,14 +775,20 @@ class OpenCodeBotClient:
         
         self.last_session_id = session_id
 
-        memory_content = await self._get_memory_content()
-
         mode_prompts = _system_config["mode_prompts"]
         mode_instruction = mode_prompts.get(active_mode, mode_prompts["execute"])
         anti_loop = _system_config["anti_loop"]
         agent_prompts = _system_config["agent_prompts"]
         agent_instruction = agent_prompts.get(active_agent, "")
 
+        chat_context = ""
+        if chat_id:
+            chat_context = f"\n\n[USER_CONTEXT]\nCURRENT_CHAT_ID: {chat_id}\nCURRENT_SESSION_ID: {session_uuid or 'unknown'}\n[END USER_CONTEXT]"
+            chat_context += "\n\n<b>FILE STORAGE</b>: When creating files, save them inside <code>data/files/</code>. Use date-based subfolders: <code>data/files/{{YYYY-MM-DD}}/{{CURRENT_SESSION_ID}}_{{HHMMSS}}_{{filename}}</code> so files are linked to sessions and dates."
+        
+        tool_instruction = _system_config["tool_instruction"]
+
+        # Inject available skills/agents
         skills_block = ""
         try:
             agents = await self._get_agents_cached()
@@ -844,13 +802,6 @@ class OpenCodeBotClient:
                 skills_block = "\n".join(lines)
         except Exception:
             pass
-
-        chat_context = ""
-        if chat_id:
-            chat_context = f"\n\n[USER_CONTEXT]\nCURRENT_CHAT_ID: {chat_id}\nCURRENT_SESSION_ID: {session_uuid or 'unknown'}\n[END USER_CONTEXT]"
-            chat_context += "\n\n<b>FILE STORAGE</b>: When creating files, save them inside <code>data/files/</code>. Use date-based subfolders: <code>data/files/{{YYYY-MM-DD}}/{{CURRENT_SESSION_ID}}_{{HHMMSS}}_{{filename}}</code> so files are linked to sessions and dates."
-        
-        tool_instruction = _system_config["tool_instruction"]
 
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         system_base = TELEGRAM_SYSTEM_PROMPT.replace("{PROJECT_ROOT}", project_root)
@@ -867,19 +818,19 @@ class OpenCodeBotClient:
                 continue
 
         tool_context = await self._build_tool_context()
-        memory_content = await self._get_memory_content()
-        memory_block = f"\n\n[LONG-TERM MEMORY]\n{memory_content}\n[END MEMORY]" if memory_content else ""
+
+        # Knowledge map: compact pointers instead of inlined content
         memory_instruction = _system_config["memory_instruction"]
+        knowledge_map = (
+            "\n\n[KNOWLEDGE FILES \u2014 read on demand via tool]\n"
+            f"- memory.md ({self._memory_path}): Core profile, user info, experience index\n"
+            f"- {BMO_FILE}: BMO identity and behavioral rules\n"
+            f"- {USER_FILE}: Dynamic user profile (auto-updated)\n"
+            "- data/experience/*.md: Detailed technical memories\n"
+            "[END KNOWLEDGE FILES]"
+        )
 
-        bmo_content = await self._get_bmo_identity()
-        bmo_block = f"\n\n[BMO IDENTITY]\n{bmo_content}\n[END BMO IDENTITY]" if bmo_content else ""
-        identity_instruction = _system_config.get("identity_instruction", "")
-
-        user_content = await self._get_user_profile()
-        user_block = f"\n\n[USER PROFILE]\n{user_content}\n[END USER PROFILE]" if user_content else ""
-        profile_instruction = _system_config.get("profile_instruction", "")
-
-        full_system_context = system_base + memory_instruction + identity_instruction + bmo_block + profile_instruction + user_block + tool_instruction + chat_context + skills_block + memory_block + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + anti_loop + agent_instruction
+        full_system_context = system_base + memory_instruction + tool_instruction + chat_context + skills_block + knowledge_map + security_warning + tool_context + f"\n\nCURRENT PROTOCOL: {mode_instruction}" + anti_loop + agent_instruction
 
         payload = {
             "parts": [

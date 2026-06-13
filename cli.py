@@ -8,6 +8,7 @@ import asyncio
 import os
 import sys
 import threading
+import time
 import logging
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,9 @@ USERNAME = "cli_user"
 # Capture where the user launched bmo from — this is the project context
 USER_CWD = os.getcwd()
 
+# Track start time for dynamic reload detection
+_start_time = time.time()
+
 # CLI Commands with descriptions for autocomplete proposals
 COMMAND_DESCRIPTIONS = {
     "/agent": "Switch AI agent mode",
@@ -68,6 +72,9 @@ COMMAND_DESCRIPTIONS = {
     "/sessions": "List and manage sessions",
     "/share": "Share session context",
     "/plugins": "List, enable, disable, and reload plugins (/plugins enable <name>)",
+    "/publish": "Publish BMO npm package (owner only)",
+    "/quote": "Show a random quote",
+    "/shapes": "Print random ASCII shapes",
     "/reload": "Hot-reload all plugins without restart",
     "/status": "Show system status",
     "/stop": "Stop current operation",
@@ -806,12 +813,22 @@ async def main():
     # so we start it explicitly here instead.
     if not engine._bfp_started:
         from config.settings import BFP_RELAY_URL, BFP_TRANSPORT_PORT, BFP_A2A_PORT
-        _relay = BFP_RELAY_URL or "http://localhost:9753"
-        asyncio.create_task(engine.bfp.start(
-            bfp_port=BFP_TRANSPORT_PORT,
-            a2a_port=BFP_A2A_PORT,
-            relay_url=_relay,
-        ))
+        import os as _os
+        _connect_did = _os.environ.get("BFP_CONNECT_DID", "").strip()
+        if _connect_did:
+            # Resolve DID via registry — don't pass relay_url, bfp_agent handles it
+            _relay = "(resolve via registry)"
+            asyncio.create_task(engine.bfp.start(
+                bfp_port=BFP_TRANSPORT_PORT,
+                a2a_port=BFP_A2A_PORT,
+            ))
+        else:
+            _relay = BFP_RELAY_URL or "http://localhost:9753"
+            asyncio.create_task(engine.bfp.start(
+                bfp_port=BFP_TRANSPORT_PORT,
+                a2a_port=BFP_A2A_PORT,
+                relay_url=_relay,
+            ))
         engine._bfp_started = True
         print_info(f"BFP Agent starting... (relay: {_relay})")
 
@@ -991,6 +1008,9 @@ async def main():
                     print_info("  /diagnose or /d  - Run full connection diagnostics (multi-endpoint)")
                     print_info("  /web             - Start/show webchat URL (Cloudflare tunnel)")
                     print_info("  /plugins         - List, enable/disable plugins (/plugins enable <name>)")
+                    print_info("  /publish         - Publish BMO npm package (owner only)")
+                    print_info("  /quote           - Show a random quote")
+                    print_info("  /shapes          - Print random ASCII shapes")
                     print_info("  /<pluginname>    - Run any loaded plugin directly (e.g. /sysmon cpu)")
                     print_info("  /reload          - Hot-reload plugins without restarting bot")
                     print_info("  /goal <task>     - Run autonomous goal loop (parallel subagents)")
@@ -1325,9 +1345,9 @@ async def main():
                     print_success(f"Session exported → {out_path}")
 
                 elif cmd == "/bfp":
-                    parts = user_input.split(maxsplit=2)
+                    parts = user_input.split(maxsplit=3)
                     subcmd = parts[1] if len(parts) > 1 else ""
-                    if subcmd == "status":
+                    if subcmd == "status" and len(parts) < 3:
                         s = engine.bfp.get_status()
                         print_info("── BFP Status ──")
                         print_info(f"  DID           : {s['did']}")
@@ -1393,12 +1413,49 @@ async def main():
                         except Exception as e:
                             print_error(f"Talk failed: {e}")
 
+                    elif subcmd == "tasks":
+                        tasks = engine.bfp.list_tasks()
+                        if not tasks:
+                            print_info("No tasks found.")
+                        else:
+                            print_info(f"BFP Tasks ({len(tasks)}):")
+                            for t in tasks:
+                                status_icon = {"pending": "⏳", "processing": "🔄", "completed": "✅", "failed": "❌", "cancelled": "🚫"}
+                                icon = status_icon.get(t["status"], "❓")
+                                print_info(f"  {icon} {t['id']}")
+                                print_info(f"      Source: {t['source'][:30]}")
+                                print_info(f"      Status: {t['status']}")
+                                result_preview = (t.get("result") or "")[:80]
+                                if result_preview:
+                                    print_info(f"      Result: {result_preview}")
+                                if t.get("error"):
+                                    print_info(f"      Error:  {t['error']}")
+
+                    elif subcmd == "status" and len(parts) >= 3:
+                        task_id = parts[2]
+                        t = engine.bfp.get_task(task_id)
+                        if not t:
+                            print_error(f"Task {task_id} not found.")
+                        else:
+                            print_info(f"Task: {t['id']}")
+                            print_info(f"  Source: {t['source']}")
+                            print_info(f"  Status: {t['status']}")
+                            print_info(f"  Created: {t['created_at']}")
+                            print_info(f"  Updated: {t['updated_at']}")
+                            print_info(f"  Completed: {t.get('completed_at', 'N/A')}")
+                            print_info(f"  Result: {t.get('result', 'N/A')}")
+                            if t.get("error"):
+                                print_info(f"  Error: {t['error']}")
+                            print_info(f"  Data: {t.get('data', {})}")
+
                     else:
                         print_info("BFP Commands:")
                         print_info("  /bfp status               - Show BFP identity and connection status")
                         print_info("  /bfp find <capability>    - Find agents by capability via relay")
                         print_info("  /bfp delegate <did> <msg> - Send a task to another agent")
                         print_info("  /bfp talk <did> <msg>     - Chat with another agent")
+                        print_info("  /bfp tasks                - List all BFP tasks and their status")
+                        print_info("  /bfp status <task_id>     - Show detailed status of a specific task")
 
                 elif cmd == "/web":
                     # Check task registry for existing webchat/tunnel
@@ -1527,6 +1584,59 @@ async def main():
                     print_success(f"Updated config: {key}={display_val} (saved to {env_path})")
                     continue
 
+                elif cmd == "/publish":
+                    if CHAT_ID != OWNER_ID:
+                        print_error("Only the owner can publish the npm package.")
+                        continue
+                    bump_part = "minor"
+                    if len(cmd_parts) > 1:
+                        arg = cmd_parts[1].lower()
+                        if arg in ("major", "minor", "patch"):
+                            bump_part = arg
+                    print_info(f"Publishing @aliwey/bmo ({bump_part} bump)...")
+                    console.print()
+                    from tools.publish import do_publish
+                    with console.status("[bold cyan]Publishing...") as _status:
+                        result = await do_publish(bump_part)
+                    if result["success"]:
+                        print_success(result["message"])
+                        if result["details"]:
+                            console.print(f"  [dim]{result['details']}[/dim]")
+                        print_info("Run /reload to activate the new version locally.")
+                    else:
+                        print_error(result["message"])
+                        if result["details"]:
+                            console.print(f"  [dim]{result['details']}[/dim]")
+                    continue
+
+                elif cmd == "/quote":
+                    import random
+                    quotes = [
+                        "The only limit to our realization of tomorrow is our doubts of today.",
+                        "Do not wait to strike till the iron is hot; but make it hot by striking.",
+                        "Great minds discuss ideas; average minds discuss events; small minds discuss people.",
+                        "Whether you think you can or you think you can't, you're right.",
+                        "The best way to predict the future is to create it.",
+                        "BMO is the best robot!"
+                    ]
+                    print_info(f"💡 {random.choice(quotes)}")
+                    continue
+
+                elif cmd == "/shapes":
+                    import random, math
+                    shapes = {
+                        "triangle": "    /\\\n   /  \\\n  /    \\\n /______\\",
+                        "square": "  ┌─────┐\n  │     │\n  │     │\n  └─────┘",
+                        "circle": "   ╭───╮\n  │     │\n  │     │\n   ╰───╯",
+                        "diamond": "    /\\\n   /  \\\n  /    \\\n /      \\\n \\      /\n  \\    /\n   \\  /\n    \\/",
+                        "star": "    *\n   ***\n  *****\n   ***\n    *",
+                        "hexagon": "  ┌────┐\n /      \\\n|        |\n \\      /\n  └────┘",
+                    }
+                    name = random.choice(list(shapes.keys()))
+                    console.print(f"[bold cyan]🟦 Random Shape: {name}[/bold cyan]")
+                    console.print(shapes[name])
+                    continue
+
                 elif cmd == "/reload":
                     from tools.plugin_loader import plugin_loader
                     result = plugin_loader.reload()
@@ -1540,7 +1650,7 @@ async def main():
                     if result["errors"]:
                         console.print(f"  ❌ Errors: [bold red]{', '.join(result['errors'])}[/bold red]")
                     if not any(result.values()):
-                        console.print("  ℹ️ No changes detected.")
+                        console.print("  ℹ️ No plugins changed.")
                     continue
 
                 elif cmd == "/plugins":
@@ -1579,6 +1689,58 @@ async def main():
                             for p in sorted(plugins, key=lambda x: x.name):
                                 status = "✅" if p.enabled else "⛔"
                                 console.print(f"  {status} [bold]{p.name}[/bold]: {p.description}")
+                    continue
+
+                elif cmd == "/generate-plugin":
+                    sub = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
+                    if not sub:
+                        sub = (await _PS().prompt_async("Describe the plugin you want to generate: ")).strip()
+                    if not sub:
+                        print_error("Description cannot be empty.")
+                        continue
+
+                    instruction = (
+                        "You are generating a BMO plugin. Follow these steps:\n"
+                        "1. Read `tools/plugin_loader.py` to understand the Plugin interface (NAME, DESCRIPTION, PARAMETERS JSON Schema, async def execute()).\n"
+                        "2. Read the existing plugins in `tools/plugins/` as examples.\n"
+                        "3. Create a new plugin file at `tools/plugins/<name>.py` following the exact interface:\n"
+                        "   - NAME: str (short, lowercase, no spaces)\n"
+                        "   - DESCRIPTION: str (brief one-line)\n"
+                        "   - PARAMETERS: dict (JSON Schema with type, properties, required)\n"
+                        "   - async def execute(**kwargs) -> str\n"
+                        "4. After writing the file, call plugin_loader.reload() to hot-reload it.\n"
+                        "5. Report the plugin name, description, and how to run it.\n\n"
+                        f"User request: {sub}"
+                    )
+
+                    console.print("[bold cyan]\U0001f916 Generating plugin...[/bold cyan]")
+
+                    async def _on_token(partial: str):
+                        sys.stdout.write(partial)
+                        sys.stdout.flush()
+
+                    response = await engine.send_message_streaming(
+                        CHAT_ID, USER_ID, instruction,
+                        interface="cli", on_token=_on_token,
+                    )
+
+                    from tools.plugin_loader import plugin_loader
+                    result = plugin_loader.reload()
+                    loaded = result.get("loaded", [])
+                    reloaded = result.get("reloaded", [])
+                    errors = result.get("errors", [])
+
+                    if loaded:
+                        for name in loaded:
+                            console.print(f"  [green]\u2714[/green] Plugin [bold]{name}[/bold] created and loaded")
+                            console.print(f"     Run it with: [bold]/plugins enable {name}[/bold] then [bold]/{name}[/bold]")
+
+                    if not loaded and not reloaded and not errors:
+                        console.print("  [yellow]\u26a0 No new plugin was generated. Check the AI response above.[/yellow]")
+
+                    if errors:
+                        for err in errors:
+                            console.print(f"  [red]\u2716[/red] {err}")
                     continue
 
                 else:
@@ -1953,13 +2115,104 @@ async def main():
     except Exception:
         pass
 
+def _run_relay(args):
+    """Handle 'bmo relay' subcommand: start relay + tunnel + register with BFP Registry."""
+    from tools.bfp_relay import BFPRelay, DEFAULT_PORT
+
+    port = DEFAULT_PORT
+    for i, a in enumerate(args):
+        if a in ("--port", "-p") and i + 1 < len(args):
+            try:
+                port = int(args[i + 1])
+            except ValueError:
+                pass
+
+    print("Starting BFP relay server...")
+    relay = BFPRelay(host="0.0.0.0", port=port)
+
+    import threading
+    t = threading.Thread(target=relay.start, name="bfp-relay", daemon=True)
+    t.start()
+    print(f"BFP relay running on port {port}")
+
+    print("Starting cloudflared tunnel...")
+    import subprocess, re, json, os, httpx
+    from pathlib import Path
+
+    tunnel_proc = subprocess.Popen(
+        ["cloudflared", "tunnel", "--url", f"ws://localhost:{port}", "--no-autoupdate"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+
+    tunnel_url = None
+    for line in tunnel_proc.stdout:
+        print(line, end="")
+        m = re.search(r"https?://([a-zA-Z0-9.-]+\.trycloudflare\.com)", line)
+        if m:
+            tunnel_url = "wss://" + m.group(1)
+            break
+
+    if not tunnel_url:
+        print("ERROR: Could not determine tunnel URL")
+        return
+
+    from core.bfp_identity import BFPIdentity
+    identity = BFPIdentity()
+    did = identity.did
+
+    registry_url = os.getenv("BFP_REGISTRY_URL", "https://bfp-registry.bmo-relay.workers.dev")
+    try:
+        r = httpx.post(f"{registry_url}/register", json={
+            "did": did,
+            "relay_url": tunnel_url,
+            "capabilities": ["bfp/relay", "bfp/agent"]
+        }, timeout=10)
+        if r.status_code == 200:
+            print(f"Registered with BFP Registry ({registry_url})")
+        else:
+            print(f"Registry registration failed: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"Registry registration error: {e}")
+
+    tasks_path = Path("data/background_tasks.json")
+    tasks = {}
+    if tasks_path.exists():
+        try:
+            tasks = json.loads(tasks_path.read_text())
+        except Exception:
+            pass
+    tasks["bfp_relay_pid"] = os.getpid()
+    tasks["bfp_cf_pid"] = tunnel_proc.pid
+    tasks["bfp_tunnel_url"] = tunnel_url
+    tasks["bfp_did"] = did
+    tasks_path.parent.mkdir(parents=True, exist_ok=True)
+    tasks_path.write_text(json.dumps(tasks, indent=2))
+
+    print(f"\n  BMO BFP Relay is ONLINE")
+    print(f"  DID:    {did}")
+    print(f"  Relay:  {tunnel_url}")
+    print(f"  Mode:   Public (discoverable)\n")
+    print("  Press Ctrl+C to stop and go offline")
+
+    try:
+        tunnel_proc.wait()
+    except KeyboardInterrupt:
+        tunnel_proc.terminate()
+        try:
+            httpx.post(f"{registry_url}/deregister", json={"did": did}, timeout=5)
+        except Exception:
+            pass
+
+
 def main_run():
     import warnings
     warnings.filterwarnings("ignore", category=ResourceWarning)
-    # Suppress Windows asyncio pipe ValueError on exit (closed pipe repr noise)
     warnings.filterwarnings("ignore", message=".*I/O operation on closed pipe.*")
 
-    # Set up basic logging for the CLI TUI to write to ~/.bmo/logs/cli.log
+    if len(sys.argv) > 1 and sys.argv[1] == "relay":
+        _run_relay(sys.argv[2:])
+        return
+
     try:
         from config.settings import LOGS_DIR
         LOGS_DIR.mkdir(parents=True, exist_ok=True)

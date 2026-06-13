@@ -17,7 +17,7 @@ import websockets
 from core.bfp_discovery import BFPDiscovery
 from core.bfp_identity import get_did
 from core.bfp_agent_card import get_capabilities
-from core.bfp_tasks import create_task, get_task, process_task
+from core.bfp_tasks import create_task, get_task, wait_for_task, list_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +105,11 @@ class BFPConnector:
 
     async def _handle_incoming(self, from_did: str, payload: dict, request_id: str):
         task_data = payload.get("params", {}).get("task", payload)
-        task_id = create_task(task_data, from_did)
-        task = get_task(task_id)
+        task_id = await create_task(task_data, from_did)
+        task = await wait_for_task(task_id)
         result = task.get("result", "") if task else ""
 
-        if request_id and self._ws and not self._ws.closed:
+        if request_id and self._ws and not getattr(self._ws, "closed", getattr(getattr(self._ws, "state", None), "name", "") == "CLOSED"):
             await self._ws.send(json.dumps({
                 "action": "relay_response",
                 "requestId": request_id,
@@ -132,7 +132,7 @@ class BFPConnector:
                 await asyncio.sleep(10)
 
     async def send(self, target_did: str, payload: dict, timeout: float = 60.0) -> dict:
-        if not self._ws or self._ws.closed:
+        if not self._ws or getattr(self._ws, "closed", getattr(getattr(self._ws, "state", None), "name", "") == "CLOSED"):
             raise RuntimeError("Not connected to relay")
         request_id = f"bfp-{uuid.uuid4().hex[:12]}"
         future = asyncio.get_event_loop().create_future()
@@ -161,7 +161,7 @@ class BFPConnector:
         })
 
     async def find_agents(self, capability: str = None) -> list[dict]:
-        if not self._ws or self._ws.closed:
+        if not self._ws or getattr(self._ws, "closed", getattr(getattr(self._ws, "state", None), "name", "") == "CLOSED"):
             raise RuntimeError("Not connected to relay")
         request_id = f"bfp-list-{uuid.uuid4().hex[:12]}"
         future = asyncio.get_event_loop().create_future()
