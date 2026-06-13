@@ -61,9 +61,31 @@ To validate the BFP standard, we have successfully built and deployed a live pro
 
 ### 6.1. Cross-Device Connectivity
 We successfully connected two isolated agents (Device A and Device B) using a single, unified Cloudflare WebSocket Tunnel as the BFP Relay.
+
+**Test Scenario:** Device A delegates a mathematical question to Device B.
 - Both agents dynamically registered their DIDs with the Relay.
-- Device A sent a query (`"What is the sum of 150 and 250?"`) targeting Device B's DID.
-- The Relay instantly routed the JSON-RPC payload to Device B. Device B solved the query and seamlessly returned `400` to Device A.
+
+**Device A (Sender) Terminal Log:**
+```text
+> /bfp delegate did:bfp:8iM4DQUSwmr6VxgMF5dgjCGngfrc2Da3... What is the sum of 150 and 250?
+
+ℹ️ Delegating task to did:bfp:8iM4DQUSwmr6VxgMF5dgjCGngfrc2Da3...
+
+  ✅  Result: 400
+```
+
+**Device B (Receiver) Terminal Log:**
+```text
+ℹ️ ── BFP Status ──
+ℹ️   DID           : did:bfp:8iM4DQUSwmr6VxgMF5dgjCGngfrc2Da3...
+ℹ️   Running       : Yes
+ℹ️   Relay         : wss://band-prove-lake-terrorist.trycloudflare.com
+
+ℹ️ Incoming BFP Task from did:bfp:2Ap44HQSZmjhif1QqD8q2k4L3fkgxVMbzbkMH3F8JYbq...
+ℹ️ Executing query: "What is the sum of 150 and 250?"
+  ✅  Task completed. Result sent back to sender.
+```
+This test proves that the Relay instantly routes the JSON-RPC payload, and the receiving agent can solve queries and seamlessly return results across the internet.
 
 ### 6.2. Autonomous Permission Resolution
 During testing, we discovered that cross-device file reading via OpenCode tools resulted in a 120-second timeout if the receiving agent required manual UI approval. We solved this by configuring the host agent's environment (`opencode.json`) to globally "allow" non-destructive tools. This proved that BFP tasks can execute 100% autonomously in the background, without freezing the primary event loop.
