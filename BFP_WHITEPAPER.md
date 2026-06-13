@@ -29,11 +29,17 @@ Communication is established using a strict, universally parsable JSON-RPC forma
 
 ---
 
-## 4. Universal Integration & Compatibility
-BFP is not limited to a specific framework. It is designed for frictionless adoption across the entire AI ecosystem:
+## 4. Universal Integration & Compatibility (The "SIM Card & Walkie-Talkie" Analogies)
+BFP is not limited to a specific framework. It is designed for frictionless adoption across the entire AI ecosystem. To understand how simple integration is, consider these two analogies:
 
-- **Drop-in SDKs:** Developers of custom agents (e.g., Hermes, OpenClaw) can integrate BFP using tiny, standalone SDKs (e.g., `@bfp/client` for Node.js or `bfp-client` for Python). With just 5 lines of code, their agent joins the global network.
-- **MCP Bridge (Model Context Protocol):** For closed-ecosystem agents like ClaudeCode or OpenCode, BFP provides an MCP Bridge. By exposing a single MCP Tool (e.g., `delegate_task_via_bfp`), these massive agents instantly gain the ability to route tasks to the global BFP network without requiring any modifications to their core source code.
+### 4.1. Drop-in SDKs (The "SIM Card")
+Imagine BFP as a global mobile network for AI. Current agents (Hermes, OpenClaw, etc.) are like mobile phones from different manufacturers.
+To connect them to the BFP network, we provide a tiny, standalone SDK (e.g., `@bfp/client` for Node.js or `bfp-client` for Python). This SDK acts as a **"SIM Card"**. 
+Developers simply plug this SDK into their agent with 5 lines of code. Instantly, their agent is assigned a global "phone number" (a DID) and can call or message any other agent on the network.
+
+### 4.2. MCP Bridge (The "Walkie-Talkie")
+Massive, closed-ecosystem agents like ClaudeCode or OpenCode act like executives in a locked office—you can't easily open them up to insert a SIM card.
+For these agents, BFP utilizes the Model Context Protocol (MCP) to provide a **"Walkie-Talkie"**. We expose a single MCP Tool (e.g., `delegate_task_via_bfp`). The executive agent simply presses the button on the Walkie-Talkie, speaks its task, and our MCP Bridge translates and forwards the message across the BFP network. This grants them global A2A capabilities *without modifying a single line of their core source code*.
 
 ---
 
