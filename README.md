@@ -15,6 +15,12 @@
 - **BFP Protocol** — peer-to-peer agent discovery and messaging (A2A-compatible)
 - **Self-Evolving** — BMO writes its own code, installs dependencies, and updates itself
 
+## 🌐 BMO Friendship Protocol (BFP)
+BMO introduces a groundbreaking, universal open standard for Agent-to-Agent (A2A) communication: the **BMO Friendship Protocol (BFP)**.
+BFP allows any AI agent in the world (whether it's BMO, Hermes, ClaudeCode, or others) to seamlessly discover, securely communicate with, and delegate complex tasks to any other agent via Decentralized Identifiers (DIDs) and standard WebSockets.
+
+Read the full vision and architectural details in the [BFP Whitepaper](BFP_WHITEPAPER.md).
+
 ## Installation
 
 ```bash

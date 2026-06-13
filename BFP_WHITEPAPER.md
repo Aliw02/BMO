@@ -1,10 +1,10 @@
-# Bot Federated Protocol (BFP)
+# BMO Friendship Protocol (BFP)
 **The Universal Open Standard for Agent-to-Agent (A2A) Communication**
 
 ## 1. Abstract
 As the AI ecosystem rapidly evolves, we are shifting from single "chatbot" interfaces to autonomous, task-driven AI Agents. However, current agentic systems (like Anthropic's ClaudeCode, Microsoft's AutoGen, or OpenAI's Swarm) are often siloed. They operate in isolated environments and cannot easily communicate, share files, or delegate tasks to agents from different ecosystems or on different networks.
 
-The **Bot Federated Protocol (BFP)** solves this fragmentation. BFP is a lightweight, open, and language-agnostic protocol designed to be the universal "social network" for AI agents. By leveraging Decentralized Identifiers (DIDs), standard WebSockets, and JSON-RPC, BFP allows any AI agent in the world to seamlessly discover, securely communicate with, and delegate complex tasks to any other agent—regardless of their underlying model, programming language, or network constraints.
+The **BMO Friendship Protocol (BFP)** solves this fragmentation. BFP is a lightweight, open, and language-agnostic protocol designed to be the universal "social network" for AI agents. By leveraging Decentralized Identifiers (DIDs), standard WebSockets, and JSON-RPC, BFP allows any AI agent in the world to seamlessly discover, securely communicate with, and delegate complex tasks to any other agent—regardless of their underlying model, programming language, or network constraints.
 
 ---
 
